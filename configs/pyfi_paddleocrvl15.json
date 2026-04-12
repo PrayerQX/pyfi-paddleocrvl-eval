@@ -1,0 +1,27 @@
+{
+  "dataset": {
+    "source": "https://huggingface.co/datasets/AgenticFinLab/PyFi-600K",
+    "csv_path": "data/pyfi/PyFi-600K-dataset.csv",
+    "images_root": "data/pyfi",
+    "sample_jsonl": "data/pyfi/pyfi_eval_301.jsonl",
+    "sample_size": 301,
+    "stratify": "capability"
+  },
+  "evaluation": {
+    "context_mode": "image_background_only",
+    "metrics": ["accuracy", "invalid_rate", "accuracy_by_capability", "accuracy_by_complexity"],
+    "artifact_policy": "save raw prediction, normalized prediction, PaddleOCR-VL markdown and JSON"
+  },
+  "model": {
+    "adapter": "paddleocr-vl-docqa",
+    "paddleocr_pipeline_version": "v1.5",
+    "use_chart_recognition": true,
+    "selector_model_env": "FINVL_SELECTOR_MODEL",
+    "selector_api_env": ["OPENAI_API_KEY", "OPENAI_BASE_URL"]
+  },
+  "claim_gate": {
+    "minimum_finance_eval_size": 301,
+    "must_report": ["overall", "Perception", "Data_extraction", "Calculation_analysis", "Pattern_recognition", "Logical_reasoning", "Decision_support"],
+    "claim_rule": "Only call PaddleOCR-VL 1.5 the first-choice financial document parser if it wins or is statistically tied on overall quality while also leading on cost/latency and failure rate."
+  }
+}

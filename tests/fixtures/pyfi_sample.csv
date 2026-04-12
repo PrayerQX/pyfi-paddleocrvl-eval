@@ -1,0 +1,3 @@
+question_node_no,options,complexity,visit_count,fq_no,capability,victory_count,image_background,parent_node_no,actions,question,image_path
+1,"{'A': 'Light green', 'B': 'Dark blue'}",1,3,1,Perception,0,"A chart background",0,"[{'answer_no': 0, 'answer': 'A', 'visit_count': 1, 'victory_count': 0}]","Which color?",./images/000001/000010.jpg
+2,"{'A': 'Up', 'B': 'Down'}",2,1,1,Pattern_recognition,0,"A line chart background",1,"[{'answer_no': 1, 'answer': 'B', 'visit_count': 1, 'victory_count': 0}]","What is the trend?",./images/000001/000011.jpg
