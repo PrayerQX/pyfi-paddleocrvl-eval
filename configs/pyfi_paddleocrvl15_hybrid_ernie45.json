@@ -1,0 +1,25 @@
+{
+  "dataset": {
+    "sample_jsonl": "data/pyfi/pyfi_eval_301.jsonl",
+    "images_root": "data/pyfi"
+  },
+  "model": {
+    "adapter": "paddleocr-vl-hybrid-docqa",
+    "paddleocr_pipeline_version": "v1.5",
+    "selector_model": "ernie-4.5-turbo-128k-preview",
+    "selector_base_url": "https://aistudio.baidu.com/llm/lmapi/v3",
+    "selector_api_env": "FINVL_SELECTOR_API_KEY",
+    "vl_artifacts_dir": "runs/pyfi_paddleocrvl15_glm301_artifacts",
+    "ocr_artifacts_dir": "runs/pyfi_paddleocr_text_glm301_artifacts"
+  },
+  "run": {
+    "smoke_out": "runs/pyfi_paddleocrvl15_hybrid_ernie45_10.jsonl",
+    "local_50_out": "runs/pyfi_paddleocrvl15_hybrid_ernie45_50.jsonl",
+    "full_out": "runs/pyfi_paddleocrvl15_hybrid_ernie45_301.jsonl"
+  },
+  "notes": [
+    "Do not commit API keys. Set FINVL_SELECTOR_API_KEY in the shell before running.",
+    "This adapter reuses existing PaddleOCR-VL markdown and traditional PaddleOCR text artifacts when present.",
+    "ernie-5.0-thinking-preview is supported, but local testing showed very high latency for batch evaluation."
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "dataset": {
+    "sample_jsonl": "data/pyfi/pyfi_eval_301.jsonl",
+    "images_root": "data/pyfi"
+  },
+  "model": {
+    "adapter": "paddleocr-vl-grounded-docqa",
+    "paddleocr_pipeline_version": "v1.5",
+    "selector_model": "ernie-4.5-turbo-128k-preview",
+    "selector_base_url": "https://aistudio.baidu.com/llm/lmapi/v3",
+    "selector_api_env": "FINVL_SELECTOR_API_KEY",
+    "vl_artifacts_dir": "runs/pyfi_paddleocrvl15_glm301_artifacts",
+    "ocr_artifacts_dir": "runs/pyfi_paddleocr_text_glm301_artifacts"
+  },
+  "grounding": {
+    "evidence_packet": [
+      "PaddleOCR-VL HTML table rows",
+      "PaddleOCR text lines",
+      "option-aware evidence hits",
+      "exploratory numeric candidates",
+      "raw PaddleOCR-VL markdown appendix",
+      "raw PaddleOCR text appendix"
+    ],
+    "selector_policy": "Selector must return a valid option with a short Paddle evidence field."
+  },
+  "run": {
+    "local_10_out": "runs/pyfi_paddleocrvl15_grounded_ernie45_10.jsonl",
+    "local_50_out": "runs/pyfi_paddleocrvl15_grounded_ernie45_50.jsonl",
+    "full_out": "runs/pyfi_paddleocrvl15_grounded_ernie45_301.jsonl"
+  }
+}

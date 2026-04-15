@@ -90,16 +90,36 @@ def main() -> None:
             "openai-compatible-vlm",
             "paddleocr-text-docqa",
             "paddleocr-vl-docqa",
+            "paddleocr-vl-hybrid-docqa",
+            "paddleocr-vl-grounded-docqa",
+            "paddleocr-vl-boosted-docqa",
         ],
         default="first-option",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--openai-model", default="gpt-4.1")
     parser.add_argument("--selector-model", help="Text-only selector model for PaddleOCR-VL parsed markdown")
+    parser.add_argument("--selector-base-url", help="OpenAI-compatible selector base URL")
+    parser.add_argument("--selector-max-tokens", type=int, help="Selector max_tokens or max_completion_tokens value")
+    parser.add_argument(
+        "--selector-use-max-completion-tokens",
+        action="store_true",
+        default=None,
+        help="Send selector token limit as max_completion_tokens instead of max_tokens",
+    )
+    parser.add_argument(
+        "--selector-stream",
+        action="store_true",
+        default=None,
+        help="Use streaming chat completions for selector models",
+    )
+    parser.add_argument("--selector-extra-body-json", help="JSON object passed as extra_body to selector calls")
     parser.add_argument("--artifacts-dir", help="Directory for PaddleOCR-VL markdown/json artifacts")
+    parser.add_argument("--ocr-artifacts-dir", help="Directory for traditional PaddleOCR text/json artifacts")
     parser.add_argument("--paddle-vl-backend", help="PaddleOCR VL recognition backend")
     parser.add_argument("--paddle-vl-server-url", help="PaddleOCR VL recognition server URL")
     parser.add_argument("--paddle-vl-model-dir", help="Local PaddleOCR-VL recognition model dir")
+    parser.add_argument("--num-passes", type=int, default=3, help="Number of passes for self-consistency voting")
     args = parser.parse_args()
     run(args)
 
