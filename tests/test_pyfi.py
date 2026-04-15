@@ -52,6 +52,14 @@ class PromptAndScoringTests(unittest.TestCase):
         prompt = build_mcq_prompt(record)
         self.assertIn("Background", prompt)
         self.assertEqual(normalize_answer("The answer is B.", record.valid_options), "B")
+        self.assertEqual(normalize_answer('{"answer":"B"}', record.valid_options), "B")
+        self.assertEqual(normalize_answer('```json\n{"answer":"B"}\n```', record.valid_options), "B")
+        self.assertIsNone(
+            normalize_answer(
+                "A long analysis without a final answer, continuing with more reasoning text.",
+                record.valid_options,
+            )
+        )
         metrics = aggregate(
             [
                 {"correct": True, "prediction": "B", "capability": "Perception", "complexity": "1"},

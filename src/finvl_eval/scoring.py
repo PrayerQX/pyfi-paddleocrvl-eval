@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from collections import defaultdict
 from typing import Any, Iterable
@@ -8,15 +9,46 @@ from typing import Any, Iterable
 def normalize_answer(raw: Any, valid_options: set[str]) -> str | None:
     if raw is None:
         return None
+    if isinstance(raw, dict):
+        for key in ("answer", "option", "prediction"):
+            value = raw.get(key)
+            if isinstance(value, str) and value.strip().upper() in valid_options:
+                return value.strip().upper()
     text = str(raw).strip().upper()
     if text in valid_options:
         return text
     if not text:
         return None
-    matches = re.findall(r"\b([A-Z])\b", text)
-    for match in matches:
-        if match in valid_options:
-            return match
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, ValueError):
+        parsed = None
+        json_match = re.search(r"\{.*\}", str(raw), flags=re.DOTALL)
+        if json_match:
+            try:
+                parsed = json.loads(json_match.group(0))
+            except ValueError:
+                parsed = None
+    if isinstance(parsed, dict):
+        for key in ("answer", "option", "prediction"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip().upper() in valid_options:
+                return value.strip().upper()
+    answer_patterns = [
+        r"\bANSWER\s*(?:IS|:|=)\s*([A-Z])\b",
+        r"\bOPTION\s*([A-Z])\b",
+        r"答案\s*(?:是|:|：)?\s*([A-Z])\b",
+        r"选项\s*([A-Z])\b",
+    ]
+    for pattern in answer_patterns:
+        match = re.search(pattern, text)
+        if match and match.group(1) in valid_options:
+            return match.group(1)
+    if len(text) <= 40:
+        matches = re.findall(r"\b([A-Z])\b", text)
+        for match in matches:
+            if match in valid_options:
+                return match
     if len(text) == 1 and text in valid_options:
         return text
     return None
