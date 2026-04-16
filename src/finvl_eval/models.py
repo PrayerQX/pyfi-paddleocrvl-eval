@@ -12,6 +12,10 @@ from .evidence import build_grounded_evidence
 from .records import EvalRecord
 from .scoring import normalize_answer
 
+# Lazy imports to avoid hard dependency when security/veto features are unused
+_SECURITY_AVAILABLE = True
+_VETO_AVAILABLE = True
+
 
 class ModelAdapter(Protocol):
     name: str
@@ -48,12 +52,16 @@ class OpenAICompatibleVLMAdapter:
         api_key: str | None = None,
         base_url: str | None = None,
         timeout: int = 120,
+        security_ctx: Any | None = None,
+        veto_config: Any | None = None,
     ) -> None:
         self.name = model
         self.model = model
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.base_url = (base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
         self.timeout = timeout
+        self._security_ctx = security_ctx
+        self._veto_config = veto_config
 
     def predict(self, record: EvalRecord, image_path: Path, prompt: str) -> str | None:
         if not self.api_key:
@@ -105,6 +113,8 @@ class PaddleOCRTextDocQAAdapter:
         selector_extra_body: dict[str, Any] | None = None,
         selector_max_tokens: int | None = None,
         selector_use_max_completion_tokens: bool | None = None,
+        security_ctx: Any | None = None,
+        veto_config: Any | None = None,
     ) -> None:
         self.selector_model = selector_model or os.getenv("FINVL_SELECTOR_MODEL")
         self.selector_base_url = selector_base_url or _selector_base_url()
@@ -119,6 +129,8 @@ class PaddleOCRTextDocQAAdapter:
         )
         self.artifacts_dir = Path(artifacts_dir) if artifacts_dir else None
         self._ocr = None
+        self._security_ctx = security_ctx
+        self._veto_config = veto_config
 
     def predict(self, record: EvalRecord, image_path: Path, prompt: str) -> str | None:
         ocr_text = self.parse_image(image_path, record.uid)
@@ -188,7 +200,14 @@ class PaddleOCRTextDocQAAdapter:
             stream=self.selector_stream,
             extra_body=self.selector_extra_body,
             use_max_completion_tokens=self.selector_use_max_completion_tokens,
+            security_ctx=self._security_ctx,
+            uid=record.uid,
+            adapter_name=self.name,
         )
+        prediction = normalize_answer(raw, record.valid_options)
+        vetoed = _apply_veto(self._veto_config, prediction, record, ocr_text, raw)
+        if vetoed is not None:
+            return vetoed
         return _valid_or_fallback(record, raw, ocr_text)
 
 
@@ -217,6 +236,8 @@ class PaddleOCRVLDocQAAdapter:
         selector_extra_body: dict[str, Any] | None = None,
         selector_max_tokens: int | None = None,
         selector_use_max_completion_tokens: bool | None = None,
+        security_ctx: Any | None = None,
+        veto_config: Any | None = None,
     ) -> None:
         self.selector_model = selector_model or os.getenv("FINVL_SELECTOR_MODEL")
         self.selector_base_url = selector_base_url or _selector_base_url()
@@ -235,6 +256,8 @@ class PaddleOCRVLDocQAAdapter:
         self.artifacts_dir = Path(artifacts_dir) if artifacts_dir else None
         self.use_chart_recognition = use_chart_recognition
         self._pipeline = None
+        self._security_ctx = security_ctx
+        self._veto_config = veto_config
 
     def predict(self, record: EvalRecord, image_path: Path, prompt: str) -> str | None:
         parsed_markdown = self.parse_image(image_path, record.uid)
@@ -318,7 +341,14 @@ class PaddleOCRVLDocQAAdapter:
             stream=self.selector_stream,
             extra_body=self.selector_extra_body,
             use_max_completion_tokens=self.selector_use_max_completion_tokens,
+            security_ctx=self._security_ctx,
+            uid=record.uid,
+            adapter_name=self.name,
         )
+        prediction = normalize_answer(raw, record.valid_options)
+        vetoed = _apply_veto(self._veto_config, prediction, record, parsed_markdown, raw)
+        if vetoed is not None:
+            return vetoed
         return _valid_or_fallback(record, raw, parsed_markdown)
 
     def _select_with_lexical_heuristic(self, record: EvalRecord, parsed_markdown: str) -> str | None:
@@ -363,6 +393,8 @@ class PaddleOCRVLHybridDocQAAdapter(PaddleOCRVLDocQAAdapter):
         selector_extra_body: dict[str, Any] | None = None,
         selector_max_tokens: int | None = None,
         selector_use_max_completion_tokens: bool | None = None,
+        security_ctx: Any | None = None,
+        veto_config: Any | None = None,
     ) -> None:
         super().__init__(
             selector_model=selector_model,
@@ -377,6 +409,8 @@ class PaddleOCRVLHybridDocQAAdapter(PaddleOCRVLDocQAAdapter):
             selector_extra_body=selector_extra_body,
             selector_max_tokens=selector_max_tokens,
             selector_use_max_completion_tokens=selector_use_max_completion_tokens,
+            security_ctx=security_ctx,
+            veto_config=veto_config,
         )
         self._ocr_adapter = PaddleOCRTextDocQAAdapter(
             selector_model=None,
@@ -421,8 +455,16 @@ class PaddleOCRVLHybridDocQAAdapter(PaddleOCRVLDocQAAdapter):
             stream=self.selector_stream,
             extra_body=self.selector_extra_body,
             use_max_completion_tokens=self.selector_use_max_completion_tokens,
+            security_ctx=self._security_ctx,
+            uid=record.uid,
+            adapter_name=self.name,
         )
-        return _valid_or_fallback(record, raw, "\n\n".join([parsed_markdown, ocr_text]))
+        combined = "\n\n".join([parsed_markdown, ocr_text])
+        prediction = normalize_answer(raw, record.valid_options)
+        vetoed = _apply_veto(self._veto_config, prediction, record, combined, raw)
+        if vetoed is not None:
+            return vetoed
+        return _valid_or_fallback(record, raw, combined)
 
 
 class PaddleOCRVLBoostedDocQAAdapter(PaddleOCRVLHybridDocQAAdapter):
@@ -481,14 +523,18 @@ class PaddleOCRVLBoostedDocQAAdapter(PaddleOCRVLHybridDocQAAdapter):
                 stream=self.selector_stream,
                 extra_body=self.selector_extra_body,
                 use_max_completion_tokens=self.selector_use_max_completion_tokens,
+                security_ctx=self._security_ctx,
+                uid=record.uid,
+                adapter_name=self.name,
             )
             answer = normalize_answer(raw, record.valid_options)
             if answer:
                 votes[answer] = votes.get(answer, 0) + 1
                 last_valid_raw = raw
 
+        combined = "\n\n".join([parsed_markdown, ocr_text])
         if not votes:
-            return _valid_or_fallback(record, last_valid_raw, "\n\n".join([parsed_markdown, ocr_text]))
+            return _valid_or_fallback(record, last_valid_raw, combined)
 
         best = max(votes, key=votes.get)
         total_votes = sum(votes.values())
@@ -499,6 +545,11 @@ class PaddleOCRVLBoostedDocQAAdapter(PaddleOCRVLHybridDocQAAdapter):
             rerouted = self._try_reroute_d(record, parsed_markdown, ocr_text, votes, total_votes, max_votes, client)
             if rerouted is not None:
                 return rerouted
+
+        # Veto check with vote information
+        vetoed = _apply_veto(self._veto_config, best, record, combined, last_valid_raw, votes=votes)
+        if vetoed is not None:
+            return vetoed
 
         return json.dumps({"answer": best, "votes": votes}, ensure_ascii=False)
 
@@ -534,6 +585,9 @@ class PaddleOCRVLBoostedDocQAAdapter(PaddleOCRVLHybridDocQAAdapter):
             stream=self.selector_stream,
             extra_body=self.selector_extra_body,
             use_max_completion_tokens=self.selector_use_max_completion_tokens,
+            security_ctx=self._security_ctx,
+            uid=record.uid,
+            adapter_name=self.name,
         )
         hybrid_answer = normalize_answer(hybrid_raw, record.valid_options)
         if hybrid_answer and hybrid_answer != "D":
@@ -594,17 +648,72 @@ class PaddleOCRVLGroundedDocQAAdapter(PaddleOCRVLHybridDocQAAdapter):
             stream=self.selector_stream,
             extra_body=self.selector_extra_body,
             use_max_completion_tokens=self.selector_use_max_completion_tokens,
+            security_ctx=self._security_ctx,
+            uid=record.uid,
+            adapter_name=self.name,
         )
+        combined = "\n\n".join([parsed_markdown, ocr_text])
+        prediction = normalize_answer(raw, record.valid_options)
+        vetoed = _apply_veto(self._veto_config, prediction, record, combined, raw)
+        if vetoed is not None:
+            return vetoed
         return _valid_or_fallback(record, raw, evidence.text)
 
 
+def _apply_veto(
+    veto_config: Any | None,
+    prediction: str | None,
+    record: EvalRecord,
+    evidence_text: str,
+    raw_prediction: str | None,
+    votes: dict[str, int] | None = None,
+) -> str | None:
+    """Apply one-vote veto check. Returns a JSON string with veto fallback if vetoed, or None."""
+    if veto_config is None or not getattr(veto_config, "enabled", False):
+        return None
+    if prediction is None:
+        return None
+
+    from .veto import check_veto
+
+    result = check_veto(
+        prediction=prediction,
+        record=record,
+        evidence_text=evidence_text,
+        raw_prediction=raw_prediction,
+        votes=votes,
+        config=veto_config,
+    )
+    if result.vetoed and result.fallback_prediction:
+        return json.dumps(
+            {
+                "answer": result.fallback_prediction,
+                "veto": {
+                    "original": result.original_prediction,
+                    "reason": result.veto_reason,
+                    "composite": result.confidence.composite,
+                },
+            },
+            ensure_ascii=False,
+        )
+    return None
+
+
 def build_adapter(args: Any) -> ModelAdapter:
+    # Extract security context and veto config from args if present
+    security_ctx = getattr(args, "_security_ctx", None)
+    veto_config = getattr(args, "_veto_config", None)
+
     if args.model == "first-option":
         return FirstOptionAdapter()
     if args.model == "random-option":
         return RandomOptionAdapter(seed=args.seed)
     if args.model == "openai-compatible-vlm":
-        return OpenAICompatibleVLMAdapter(model=args.openai_model)
+        return OpenAICompatibleVLMAdapter(
+            model=args.openai_model,
+            security_ctx=security_ctx,
+            veto_config=veto_config,
+        )
     if args.model == "paddleocr-text-docqa":
         return PaddleOCRTextDocQAAdapter(
             selector_model=args.selector_model,
@@ -614,6 +723,8 @@ def build_adapter(args: Any) -> ModelAdapter:
             selector_extra_body=_parse_extra_body_arg(getattr(args, "selector_extra_body_json", None)),
             selector_max_tokens=getattr(args, "selector_max_tokens", None),
             selector_use_max_completion_tokens=getattr(args, "selector_use_max_completion_tokens", None),
+            security_ctx=security_ctx,
+            veto_config=veto_config,
         )
     if args.model == "paddleocr-vl-docqa":
         return PaddleOCRVLDocQAAdapter(
@@ -627,6 +738,8 @@ def build_adapter(args: Any) -> ModelAdapter:
             selector_extra_body=_parse_extra_body_arg(getattr(args, "selector_extra_body_json", None)),
             selector_max_tokens=getattr(args, "selector_max_tokens", None),
             selector_use_max_completion_tokens=getattr(args, "selector_use_max_completion_tokens", None),
+            security_ctx=security_ctx,
+            veto_config=veto_config,
         )
     if args.model == "paddleocr-vl-hybrid-docqa":
         return PaddleOCRVLHybridDocQAAdapter(
@@ -641,6 +754,8 @@ def build_adapter(args: Any) -> ModelAdapter:
             selector_extra_body=_parse_extra_body_arg(getattr(args, "selector_extra_body_json", None)),
             selector_max_tokens=getattr(args, "selector_max_tokens", None),
             selector_use_max_completion_tokens=getattr(args, "selector_use_max_completion_tokens", None),
+            security_ctx=security_ctx,
+            veto_config=veto_config,
         )
     if args.model == "paddleocr-vl-boosted-docqa":
         return PaddleOCRVLBoostedDocQAAdapter(
@@ -656,6 +771,8 @@ def build_adapter(args: Any) -> ModelAdapter:
             selector_max_tokens=getattr(args, "selector_max_tokens", None),
             selector_use_max_completion_tokens=getattr(args, "selector_use_max_completion_tokens", None),
             num_passes=getattr(args, "num_passes", 3),
+            security_ctx=security_ctx,
+            veto_config=veto_config,
         )
     if args.model == "paddleocr-vl-grounded-docqa":
         return PaddleOCRVLGroundedDocQAAdapter(
@@ -670,6 +787,8 @@ def build_adapter(args: Any) -> ModelAdapter:
             selector_extra_body=_parse_extra_body_arg(getattr(args, "selector_extra_body_json", None)),
             selector_max_tokens=getattr(args, "selector_max_tokens", None),
             selector_use_max_completion_tokens=getattr(args, "selector_use_max_completion_tokens", None),
+            security_ctx=security_ctx,
+            veto_config=veto_config,
         )
     raise ValueError(f"Unknown model adapter: {args.model}")
 
@@ -928,41 +1047,86 @@ def _chat_completion_text(
     stream: bool = False,
     extra_body: dict[str, Any] | None = None,
     use_max_completion_tokens: bool = False,
+    security_ctx: Any | None = None,
+    uid: str = "",
+    adapter_name: str = "",
 ) -> str | None:
-    kwargs: dict[str, Any] = {
-        "model": model,
-        "temperature": temperature,
-        "messages": [{"role": "user", "content": prompt}],
-    }
-    if use_max_completion_tokens:
-        kwargs["max_completion_tokens"] = max_tokens
-    else:
-        kwargs["max_tokens"] = max_tokens
-    if extra_body:
-        kwargs["extra_body"] = extra_body
-    if not stream:
-        response = client.chat.completions.create(**kwargs)
-        message = response.choices[0].message
-        return message.content or getattr(message, "reasoning_content", None)
+    import time
 
-    chunks = client.chat.completions.create(stream=True, **kwargs)
-    parts: list[str] = []
-    reasoning_parts: list[str] = []
-    for chunk in chunks:
-        choices = getattr(chunk, "choices", None)
-        if not choices:
-            continue
-        delta = getattr(choices[0], "delta", None)
-        content = getattr(delta, "content", None)
-        if content:
-            parts.append(content)
-        reasoning_content = getattr(delta, "reasoning_content", None)
-        if reasoning_content:
-            reasoning_parts.append(reasoning_content)
-    content_text = "".join(parts).strip()
-    if content_text:
-        return content_text
-    return "".join(reasoning_parts).strip() or None
+    # PII masking before API call
+    scan_result = None
+    if security_ctx is not None and getattr(security_ctx, "pii_masking", False):
+        from .security import scan_and_mask
+
+        scan_result = scan_and_mask(prompt, strict=getattr(security_ctx, "strict_pii", False))
+        prompt = scan_result.masked_text
+
+    start = time.monotonic()
+    response_text: str | None = None
+    error: str | None = None
+    try:
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if use_max_completion_tokens:
+            kwargs["max_completion_tokens"] = max_tokens
+        else:
+            kwargs["max_tokens"] = max_tokens
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+        if not stream:
+            response = client.chat.completions.create(**kwargs)
+            message = response.choices[0].message
+            response_text = message.content or getattr(message, "reasoning_content", None)
+        else:
+            chunks = client.chat.completions.create(stream=True, **kwargs)
+            parts: list[str] = []
+            reasoning_parts: list[str] = []
+            for chunk in chunks:
+                choices = getattr(chunk, "choices", None)
+                if not choices:
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                content = getattr(delta, "content", None)
+                if content:
+                    parts.append(content)
+                reasoning_content = getattr(delta, "reasoning_content", None)
+                if reasoning_content:
+                    reasoning_parts.append(reasoning_content)
+            content_text = "".join(parts).strip()
+            response_text = content_text or "".join(reasoning_parts).strip() or None
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+    latency_ms = (time.monotonic() - start) * 1000
+
+    # Audit logging after API call
+    if security_ctx is not None and getattr(security_ctx, "audit_logging", False):
+        logger = getattr(security_ctx, "audit_logger", None)
+        if logger is not None:
+            from .security import AuditEntry, _sha256_hex
+
+            logger.log(
+                AuditEntry(
+                    timestamp=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+                    uid=uid,
+                    adapter_name=adapter_name,
+                    action="select",
+                    prompt_hash=_sha256_hex(prompt),
+                    response_hash=_sha256_hex(response_text or ""),
+                    pii_masked=scan_result is not None and scan_result.has_pii,
+                    pii_match_count=len(scan_result.matches) if scan_result else 0,
+                    model=model,
+                    prediction=None,  # filled later after normalization
+                    latency_ms=round(latency_ms, 1),
+                    error=error,
+                )
+            )
+
+    if error:
+        raise RuntimeError(error)
+    return response_text
 
 
 def normalize_prediction(record: EvalRecord, raw_prediction: str | None) -> str | None:

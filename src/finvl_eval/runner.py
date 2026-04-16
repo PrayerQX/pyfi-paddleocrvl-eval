@@ -11,6 +11,8 @@ from .prompts import build_mcq_prompt
 from .pyfi import iter_jsonl, iter_pyfi_csv
 from .records import EvalRecord
 from .scoring import aggregate
+from .security import SecurityContext, create_security_context
+from .veto import VetoConfig
 
 
 def iter_records(dataset: str | Path, dataset_format: str) -> Iterable[EvalRecord]:
@@ -22,6 +24,28 @@ def iter_records(dataset: str | Path, dataset_format: str) -> Iterable[EvalRecor
 
 
 def run(args: argparse.Namespace) -> dict:
+    # Build security context from CLI flags
+    security_ctx = create_security_context(
+        enable_pii_masking=args.pii_masking,
+        enable_audit_log=args.audit_log is not None,
+        enable_encryption=args.encrypt_artifacts,
+        encryption_passphrase=getattr(args, "encryption_passphrase", None),
+        audit_log_path=args.audit_log,
+        strict_pii=args.pii_strict,
+    )
+
+    # Build veto config from CLI flags
+    veto_config = VetoConfig(
+        enabled=args.enable_veto,
+        threshold=args.veto_threshold,
+        enable_evidence_check=not args.veto_no_evidence_check,
+        enable_contradiction_check=not args.veto_no_contradiction,
+    )
+
+    # Attach to args so build_adapter can pick them up
+    args._security_ctx = security_ctx
+    args._veto_config = veto_config
+
     adapter = build_adapter(args)
     records_iter = iter_records(args.dataset, args.format)
     output_path = Path(args.out)
@@ -29,40 +53,45 @@ def run(args: argparse.Namespace) -> dict:
 
     results: list[dict] = []
     processed = 0
-    with output_path.open("w", encoding="utf-8") as f:
-        for record in records_iter:
-            if args.limit is not None and processed >= args.limit:
-                break
-            image_path = record.resolved_image_path(args.images_root)
-            if args.require_image and not image_path.exists():
-                continue
+    try:
+        with output_path.open("w", encoding="utf-8") as f:
+            for record in records_iter:
+                if args.limit is not None and processed >= args.limit:
+                    break
+                image_path = record.resolved_image_path(args.images_root)
+                if args.require_image and not image_path.exists():
+                    continue
 
-            prompt = build_mcq_prompt(record, context_mode=args.context_mode)
-            try:
-                raw_prediction = adapter.predict(record, image_path, prompt)
-                error = None
-            except Exception as exc:
-                raw_prediction = None
-                error = f"{type(exc).__name__}: {exc}"
+                prompt = build_mcq_prompt(record, context_mode=args.context_mode)
+                try:
+                    raw_prediction = adapter.predict(record, image_path, prompt)
+                    error = None
+                except Exception as exc:
+                    raw_prediction = None
+                    error = f"{type(exc).__name__}: {exc}"
 
-            prediction = normalize_prediction(record, raw_prediction)
-            item = {
-                "uid": record.uid,
-                "image_path": str(image_path),
-                "capability": record.capability,
-                "complexity": record.complexity,
-                "answer": record.answer,
-                "prediction": prediction,
-                "raw_prediction": raw_prediction,
-                "correct": prediction == record.answer if record.answer else False,
-                "error": error,
-            }
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
-            f.flush()
-            results.append(item)
-            processed += 1
-            if args.progress_every and processed % args.progress_every == 0:
-                print(f"Processed {processed} records", file=sys.stderr)
+                prediction = normalize_prediction(record, raw_prediction)
+                item = {
+                    "uid": record.uid,
+                    "image_path": str(image_path),
+                    "capability": record.capability,
+                    "complexity": record.complexity,
+                    "answer": record.answer,
+                    "prediction": prediction,
+                    "raw_prediction": raw_prediction,
+                    "correct": prediction == record.answer if record.answer else False,
+                    "error": error,
+                }
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")
+                f.flush()
+                results.append(item)
+                processed += 1
+                if args.progress_every and processed % args.progress_every == 0:
+                    print(f"Processed {processed} records", file=sys.stderr)
+    finally:
+        # Close audit logger
+        if security_ctx.audit_logger is not None:
+            security_ctx.audit_logger.close()
 
     metrics = aggregate(results)
     metrics_path = output_path.with_suffix(output_path.suffix + ".metrics.json")
@@ -120,6 +149,22 @@ def main() -> None:
     parser.add_argument("--paddle-vl-server-url", help="PaddleOCR VL recognition server URL")
     parser.add_argument("--paddle-vl-model-dir", help="Local PaddleOCR-VL recognition model dir")
     parser.add_argument("--num-passes", type=int, default=3, help="Number of passes for self-consistency voting")
+
+    # Security flags
+    sec_group = parser.add_argument_group("data security")
+    sec_group.add_argument("--pii-masking", action="store_true", help="Mask PII in prompts before sending to external APIs")
+    sec_group.add_argument("--pii-strict", action="store_true", help="Apply stricter PII detection (e.g. financial ratios)")
+    sec_group.add_argument("--audit-log", type=str, default=None, help="Path to write API audit JSONL log")
+    sec_group.add_argument("--encrypt-artifacts", action="store_true", help="Encrypt cached artifacts on disk")
+    sec_group.add_argument("--encryption-passphrase", type=str, default=None, help="Passphrase for artifact encryption (or set FINVL_ENCRYPTION_PASSPHRASE)")
+
+    # Veto flags
+    veto_group = parser.add_argument_group("one-vote veto")
+    veto_group.add_argument("--enable-veto", action="store_true", help="Enable one-vote veto for low-confidence predictions")
+    veto_group.add_argument("--veto-threshold", type=float, default=0.4, help="Confidence threshold below which veto fires (0.0-1.0)")
+    veto_group.add_argument("--veto-no-evidence-check", action="store_true", help="Disable evidence support checking in veto scoring")
+    veto_group.add_argument("--veto-no-contradiction", action="store_true", help="Disable evidence contradiction detection in veto scoring")
+
     args = parser.parse_args()
     run(args)
 
