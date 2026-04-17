@@ -32,6 +32,9 @@ class PyFiRecord:
         return {str(key).upper() for key in self.options}
 
 
+RecordKey = tuple[str, int]
+
+
 def iter_pyfi_jsonl(path: Path) -> list[PyFiRecord]:
     records: list[PyFiRecord] = []
     with path.open("r", encoding="utf-8") as handle:
@@ -52,6 +55,33 @@ def iter_pyfi_jsonl(path: Path) -> list[PyFiRecord]:
                 )
             )
     return records
+
+
+def occurrence_keys(records: list[PyFiRecord]) -> list[RecordKey]:
+    seen: dict[str, int] = defaultdict(int)
+    keys: list[RecordKey] = []
+    for record in records:
+        occurrence = seen[record.uid]
+        seen[record.uid] += 1
+        keys.append((record.uid, occurrence))
+    return keys
+
+
+def read_existing_results(path: Path) -> dict[RecordKey, dict[str, Any]]:
+    if not path.exists():
+        return {}
+    seen: dict[str, int] = defaultdict(int)
+    rows: dict[RecordKey, dict[str, Any]] = {}
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            uid = str(item["uid"])
+            occurrence = seen[uid]
+            seen[uid] += 1
+            rows[(uid, occurrence)] = item
+    return rows
 
 
 def resolve_image_path(images_root: Path, image_path: str) -> Path:
@@ -203,6 +233,7 @@ def evaluate(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
     records = iter_pyfi_jsonl(args.dataset)
     if args.limit is not None:
         records = records[: args.limit]
+    keys = occurrence_keys(records)
 
     paddle = PaddleOCRRemoteClient(
         api_url=settings.paddleocr_api_url,
@@ -222,9 +253,23 @@ def evaluate(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
     )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    existing = read_existing_results(args.out) if args.resume else {}
     results: list[dict[str, Any]] = []
-    with args.out.open("w", encoding="utf-8") as handle:
-        for index, record in enumerate(records, start=1):
+    mode = "a" if args.resume and existing else "w"
+    if existing:
+        for key in keys:
+            if key in existing:
+                results.append(existing[key])
+    with args.out.open(mode, encoding="utf-8") as handle:
+        for index, (record, record_key) in enumerate(zip(records, keys, strict=True), start=1):
+            if record_key in existing:
+                if args.progress_every and index % args.progress_every == 0:
+                    metrics = aggregate(results)
+                    print(
+                        f"Skipped {index}; correct={metrics['correct']}/{metrics['total']} "
+                        f"accuracy={metrics['accuracy']:.4f} invalid={metrics['invalid']}"
+                    )
+                continue
             image_path = resolve_image_path(args.images_root, record.image_path)
             error = None
             raw_answer = None
@@ -255,7 +300,7 @@ def evaluate(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
                     base_sleep=args.retry_base_sleep,
                 )
                 prediction = normalize_answer(raw_answer, record.valid_options)
-                if prediction is None and raw_answer == "" and not args.include_reasoning_fallback:
+                if prediction is None and not args.include_reasoning_fallback:
                     raw_answer = with_retries(
                         lambda: ernie.complete(
                             prompt,
@@ -315,6 +360,7 @@ def evaluate(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
         "sleep_between_records": args.sleep_between_records,
         "include_reasoning_fallback": args.include_reasoning_fallback,
         "fallback_first_option": args.fallback_first_option,
+        "resume": args.resume,
     }
     metrics_path = args.out.with_suffix(args.out.suffix + ".metrics.json")
     metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -351,6 +397,7 @@ def add_eval_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     parser.add_argument("--retry-attempts", type=int, default=3)
     parser.add_argument("--retry-base-sleep", type=float, default=3.0)
     parser.add_argument("--sleep-between-records", type=float, default=0.0)
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--disable-web-search", action="store_true")
     parser.add_argument("--use-doc-orientation-classify", action="store_true")
     parser.add_argument("--use-doc-unwarping", action="store_true")

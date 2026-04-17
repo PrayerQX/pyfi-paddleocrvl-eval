@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from remote_paddleocr_app.paddleocr_client import file_type_to_api_value, infer_file_type
-from remote_paddleocr_app.eval_pyfi import normalize_answer
+from remote_paddleocr_app.eval_pyfi import PyFiRecord, normalize_answer, occurrence_keys
 from remote_paddleocr_app.pipeline import build_document_qa_prompt
 
 
@@ -35,3 +35,12 @@ def test_normalize_answer_from_json() -> None:
 
 def test_normalize_answer_from_text() -> None:
     assert normalize_answer("Answer: C", {"A", "B", "C"}) == "C"
+
+
+def test_occurrence_keys_preserve_duplicate_uids() -> None:
+    records = [
+        PyFiRecord("x", "a.jpg", "q", {"A": "a"}, "A", None, None, {}),
+        PyFiRecord("x", "a.jpg", "q", {"A": "a"}, "A", None, None, {}),
+        PyFiRecord("y", "b.jpg", "q", {"A": "a"}, "A", None, None, {}),
+    ]
+    assert occurrence_keys(records) == [("x", 0), ("x", 1), ("y", 0)]

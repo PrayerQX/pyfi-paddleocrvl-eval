@@ -108,10 +108,12 @@ uv run remote-paddleocr eval-pyfi `
   --artifacts-dir output\eval_remote_301_artifacts `
   --use-chart-recognition `
   --disable-web-search `
+  --resume `
   --limit 50
 ```
 
 `--limit` 可去掉以跑完整 split。图表任务建议保留 `--use-chart-recognition`。
+长任务建议保留 `--resume`，中断后再次运行同一命令会跳过已写入的样本。
 
 ## 安全说明
 
