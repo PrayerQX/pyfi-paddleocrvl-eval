@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "remote-paddleocr-app"
+version = "0.1.0"
+description = "Remote PaddleOCR layout parsing plus ERNIE document QA CLI."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "openai>=1.0.0",
+  "python-dotenv>=1.0.1",
+  "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.6.0",
+]
+
+[project.scripts]
+remote-paddleocr = "remote_paddleocr_app.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/remote_paddleocr_app"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
