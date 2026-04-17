@@ -96,6 +96,23 @@ uv run remote-paddleocr chat "解释一下资产负债表的核心指标"
 uv run python -m pytest
 ```
 
+## 评测 PyFi JSONL
+
+这个命令只走远程 PaddleOCR API 和文心 API，不加载本地 PaddleOCR 模型：
+
+```powershell
+uv run remote-paddleocr eval-pyfi `
+  --dataset ..\data\pyfi\pyfi_eval_301.jsonl `
+  --images-root ..\data\pyfi `
+  --out output\eval_remote_301.jsonl `
+  --artifacts-dir output\eval_remote_301_artifacts `
+  --use-chart-recognition `
+  --disable-web-search `
+  --limit 50
+```
+
+`--limit` 可去掉以跑完整 split。图表任务建议保留 `--use-chart-recognition`。
+
 ## 安全说明
 
 真实 token 只允许放在本地环境变量或 `.env`。代码和文档不会提交真实 token。

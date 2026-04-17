@@ -73,22 +73,22 @@ def build_document_qa_prompt(
     choices: dict[str, str] | None = None,
 ) -> str:
     lines = [
-        "你是金融文档、图表和版面解析问答助手。",
-        "下面是 PaddleOCR 远程 API 解析出的 Markdown 证据。",
-        "请优先基于证据回答；证据不足时明确说明不足，不要编造。",
+        "You are a financial document, chart, and layout QA assistant.",
+        "The evidence below is Markdown extracted by the remote PaddleOCR API.",
+        "Answer from the evidence first. If evidence is insufficient, say so directly.",
         "",
-        "## 问题",
+        "## Question",
         question.strip(),
     ]
     if choices:
         lines.extend(
             [
                 "",
-                "## 选项",
+                "## Options",
                 *[f"{key}. {value}" for key, value in sorted(choices.items())],
                 "",
-                "如果这是选择题，请先给出选项字母，再给出简短依据。",
+                "If this is a multiple-choice question, start with the option letter, then give a short reason.",
             ]
         )
-    lines.extend(["", "## PaddleOCR Markdown 证据", markdown.strip() or "(empty)"])
+    lines.extend(["", "## PaddleOCR Markdown Evidence", markdown.strip() or "(empty)"])
     return "\n".join(lines)

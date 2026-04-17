@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .config import load_settings, require_value
 from .ernie_client import ErnieClient
+from .eval_pyfi import add_eval_parser, evaluate
 from .paddleocr_client import LayoutOptions
 from .pipeline import answer_from_document, parse_document
 
@@ -35,6 +36,8 @@ def main() -> None:
     chat_parser.add_argument("--disable-web-search", action="store_true")
     chat_parser.add_argument("--max-completion-tokens", type=int, default=65536)
     chat_parser.add_argument("--include-reasoning", action="store_true")
+
+    add_eval_parser(subparsers)
 
     args = parser.parse_args()
     settings = load_settings(args.env_file)
@@ -84,6 +87,10 @@ def main() -> None:
                 include_reasoning=args.include_reasoning,
             )
         )
+        return
+
+    if args.command == "eval-pyfi":
+        evaluate(args, settings)
         return
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from remote_paddleocr_app.paddleocr_client import file_type_to_api_value, infer_file_type
+from remote_paddleocr_app.eval_pyfi import normalize_answer
 from remote_paddleocr_app.pipeline import build_document_qa_prompt
 
 
@@ -26,3 +27,11 @@ def test_build_document_qa_prompt_contains_choices() -> None:
     assert "PaddleOCR Markdown" in prompt
     assert "A. First" in prompt
     assert "B. Second" in prompt
+
+
+def test_normalize_answer_from_json() -> None:
+    assert normalize_answer('{"answer":"B","reason":"x"}', {"A", "B"}) == "B"
+
+
+def test_normalize_answer_from_text() -> None:
+    assert normalize_answer("Answer: C", {"A", "B", "C"}) == "C"
