@@ -40,6 +40,11 @@ def run(args: argparse.Namespace) -> dict:
         threshold=args.veto_threshold,
         enable_evidence_check=not args.veto_no_evidence_check,
         enable_contradiction_check=not args.veto_no_contradiction,
+        safe_mode=not args.veto_unsafe_mode,
+        min_fallback_support=args.veto_min_fallback_support,
+        min_support_margin=args.veto_min_support_margin,
+        max_original_support=args.veto_max_original_support,
+        max_veto_vote_confidence=args.veto_max_vote_confidence,
     )
 
     # Attach to args so build_adapter can pick them up
@@ -164,6 +169,11 @@ def main() -> None:
     veto_group.add_argument("--veto-threshold", type=float, default=0.4, help="Confidence threshold below which veto fires (0.0-1.0)")
     veto_group.add_argument("--veto-no-evidence-check", action="store_true", help="Disable evidence support checking in veto scoring")
     veto_group.add_argument("--veto-no-contradiction", action="store_true", help="Disable evidence contradiction detection in veto scoring")
+    veto_group.add_argument("--veto-unsafe-mode", action="store_true", help="Use legacy broad veto behavior without high-precision safety gates")
+    veto_group.add_argument("--veto-min-fallback-support", type=float, default=0.9, help="Safe veto: minimum evidence support required for fallback")
+    veto_group.add_argument("--veto-min-support-margin", type=float, default=0.45, help="Safe veto: required fallback support minus original support")
+    veto_group.add_argument("--veto-max-original-support", type=float, default=0.25, help="Safe veto: maximum evidence support allowed for original prediction")
+    veto_group.add_argument("--veto-max-vote-confidence", type=float, default=2 / 3, help="Safe veto: maximum vote confidence allowed before veto is blocked")
 
     args = parser.parse_args()
     run(args)

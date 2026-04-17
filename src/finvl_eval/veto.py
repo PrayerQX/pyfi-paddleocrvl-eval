@@ -25,6 +25,11 @@ class VetoConfig:
     certainty_weight: float = 0.10
     enable_evidence_check: bool = True
     enable_contradiction_check: bool = True
+    safe_mode: bool = True
+    min_fallback_support: float = 0.9
+    min_support_margin: float = 0.45
+    max_original_support: float = 0.25
+    max_veto_vote_confidence: float = 2 / 3
 
 
 @dataclass(slots=True)
@@ -60,6 +65,8 @@ class VetoResult:
     fallback_prediction: str | None
     confidence: ConfidenceScore
     veto_reason: str | None = None
+    fallback_support: float = 0.0
+    support_margin: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -68,6 +75,8 @@ class VetoResult:
             "fallback_prediction": self.fallback_prediction,
             "confidence": self.confidence.to_dict(),
             "veto_reason": self.veto_reason,
+            "fallback_support": self.fallback_support,
+            "support_margin": self.support_margin,
         }
 
 
@@ -298,8 +307,24 @@ def check_veto(
             confidence=conf,
         )
 
-    # Veto triggered: find a fallback
-    fallback = _evidence_based_fallback(record, evidence_text, exclude_option=prediction)
+    # Veto triggered: find a fallback. In safe mode, the fallback must be
+    # strongly grounded and the original prediction must be weakly grounded.
+    fallback, fallback_support = _evidence_based_fallback(record, evidence_text, exclude_option=prediction)
+    support_margin = fallback_support - conf.evidence_support
+    if cfg.safe_mode and not _safe_veto_allowed(cfg, conf, fallback, fallback_support, support_margin):
+        return VetoResult(
+            vetoed=False,
+            original_prediction=prediction,
+            fallback_prediction=fallback,
+            confidence=conf,
+            veto_reason=(
+                "safe_mode_blocked; "
+                f"fallback_support={fallback_support:.3f}; "
+                f"support_margin={support_margin:.3f}"
+            ),
+            fallback_support=fallback_support,
+            support_margin=support_margin,
+        )
 
     reasons: list[str] = []
     reasons.append(f"composite={conf.composite:.3f} < threshold={cfg.threshold:.3f}")
@@ -316,14 +341,36 @@ def check_veto(
         fallback_prediction=fallback,
         confidence=conf,
         veto_reason="; ".join(reasons),
+        fallback_support=fallback_support,
+        support_margin=support_margin,
     )
+
+
+def _safe_veto_allowed(
+    cfg: VetoConfig,
+    conf: ConfidenceScore,
+    fallback: str | None,
+    fallback_support: float,
+    support_margin: float,
+) -> bool:
+    if fallback is None:
+        return False
+    if fallback_support < cfg.min_fallback_support:
+        return False
+    if conf.evidence_support > cfg.max_original_support:
+        return False
+    if support_margin < cfg.min_support_margin:
+        return False
+    if conf.vote_confidence > cfg.max_veto_vote_confidence:
+        return False
+    return True
 
 
 def _evidence_based_fallback(
     record: EvalRecord,
     evidence_text: str,
     exclude_option: str,
-) -> str | None:
+) -> tuple[str | None, float]:
     """Find the best-supported alternative option when a prediction is vetoed."""
     best_letter: str | None = None
     best_score = 0.0
@@ -336,7 +383,7 @@ def _evidence_based_fallback(
             best_letter = letter
     # Only return if there is meaningful support (>= 0.3)
     if best_letter and best_score >= 0.3:
-        return best_letter
+        return best_letter, best_score
 
     # Lexical fallback: count option text occurrences in evidence
     evidence_lower = evidence_text.lower()
@@ -351,9 +398,9 @@ def _evidence_based_fallback(
                 hits.append((count, letter))
     if hits:
         hits.sort(reverse=True)
-        return hits[0][1]
+        return hits[0][1], 0.3
 
-    return None
+    return None, 0.0
 
 
 # ---------------------------------------------------------------------------

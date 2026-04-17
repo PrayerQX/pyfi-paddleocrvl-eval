@@ -159,7 +159,7 @@ class ComputeConfidenceTests(unittest.TestCase):
 class CheckVetoTests(unittest.TestCase):
     def test_veto_below_threshold(self) -> None:
         rec = _record()
-        cfg = VetoConfig(enabled=True, threshold=0.6)
+        cfg = VetoConfig(enabled=True, threshold=0.6, safe_mode=False)
         result = check_veto(
             prediction="D",
             record=rec,
@@ -211,7 +211,7 @@ class CheckVetoTests(unittest.TestCase):
 
     def test_veto_uses_evidence_fallback(self) -> None:
         rec = _record()
-        cfg = VetoConfig(enabled=True, threshold=0.8)
+        cfg = VetoConfig(enabled=True, threshold=0.8, safe_mode=False)
         result = check_veto(
             prediction="C",
             record=rec,
@@ -225,7 +225,7 @@ class CheckVetoTests(unittest.TestCase):
 
     def test_veto_result_to_dict(self) -> None:
         rec = _record()
-        cfg = VetoConfig(enabled=True, threshold=0.9)
+        cfg = VetoConfig(enabled=True, threshold=0.9, safe_mode=False)
         result = check_veto(
             prediction="D",
             record=rec,
@@ -255,7 +255,7 @@ class CheckVetoTests(unittest.TestCase):
 
     def test_veto_with_votes(self) -> None:
         rec = _record()
-        cfg = VetoConfig(enabled=True, threshold=0.5)
+        cfg = VetoConfig(enabled=True, threshold=0.5, safe_mode=False)
         # Split votes + wrong evidence
         result = check_veto(
             prediction="D",
@@ -267,6 +267,35 @@ class CheckVetoTests(unittest.TestCase):
         )
         self.assertTrue(result.vetoed)
         self.assertEqual(result.fallback_prediction, "A")
+
+    def test_safe_mode_blocks_single_pass_veto(self) -> None:
+        rec = _record()
+        cfg = VetoConfig(enabled=True, threshold=0.8)
+        result = check_veto(
+            prediction="D",
+            record=rec,
+            evidence_text=EVIDENCE_WITH_A,
+            raw_prediction="D",
+            config=cfg,
+        )
+        self.assertFalse(result.vetoed)
+        self.assertEqual(result.fallback_prediction, "A")
+        self.assertIn("safe_mode_blocked", result.veto_reason or "")
+
+    def test_safe_mode_allows_split_vote_strong_fallback(self) -> None:
+        rec = _record()
+        cfg = VetoConfig(enabled=True, threshold=0.5)
+        result = check_veto(
+            prediction="D",
+            record=rec,
+            evidence_text=EVIDENCE_WITH_A,
+            raw_prediction="D",
+            votes={"D": 1, "A": 2},
+            config=cfg,
+        )
+        self.assertTrue(result.vetoed)
+        self.assertEqual(result.fallback_prediction, "A")
+        self.assertGreaterEqual(result.fallback_support, 0.9)
 
 
 if __name__ == "__main__":
