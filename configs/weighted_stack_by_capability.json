@@ -1,0 +1,61 @@
+{
+  "field": "capability",
+  "profiles": {
+    "Calculation_analysis": {
+      "adjudicated": 2,
+      "direct": 4,
+      "ensemble": 1,
+      "hybrid": 1,
+      "boosted": 2,
+      "ocr_text": 2
+    },
+    "Data_extraction": {
+      "adjudicated": 2,
+      "direct": 5,
+      "ensemble": 1,
+      "hybrid": 1,
+      "boosted": 2,
+      "ocr_text": 1
+    },
+    "Decision_support": {
+      "adjudicated": 4,
+      "direct": 4,
+      "ensemble": 1,
+      "hybrid": 1,
+      "boosted": 1,
+      "ocr_text": 5
+    },
+    "Logical_reasoning": {
+      "adjudicated": 2,
+      "direct": 2,
+      "ensemble": 1,
+      "hybrid": 3,
+      "boosted": 1,
+      "ocr_text": 2
+    },
+    "None": {
+      "adjudicated": 2,
+      "direct": 2,
+      "ensemble": 1,
+      "hybrid": 1,
+      "boosted": 1,
+      "ocr_text": 1
+    },
+    "Pattern_recognition": {
+      "adjudicated": 3,
+      "direct": 5,
+      "ensemble": 1,
+      "hybrid": 2,
+      "boosted": 1,
+      "ocr_text": 4
+    },
+    "Perception": {
+      "adjudicated": 2,
+      "direct": 4,
+      "ensemble": 1,
+      "hybrid": 1,
+      "boosted": 1,
+      "ocr_text": 1
+    }
+  }
+}

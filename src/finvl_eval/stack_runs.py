@@ -22,6 +22,12 @@ class RunSpec:
     weight: float
 
 
+@dataclass(frozen=True, slots=True)
+class WeightProfile:
+    field: str
+    profiles: dict[str, dict[str, float]]
+
+
 def _occurrence_key(uid: str, seen: dict[str, int]) -> OccurrenceKey:
     occurrence = seen[uid]
     seen[uid] += 1
@@ -63,11 +69,55 @@ def _parse_run_spec(value: str) -> RunSpec:
     return RunSpec(name=name, path=Path(path), weight=parsed_weight)
 
 
+def _read_weight_profile(path: Path | None) -> WeightProfile | None:
+    if path is None:
+        return None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    field = str(data.get("field") or "").strip()
+    if field not in {"capability", "complexity"}:
+        raise RuntimeError("profile field must be either 'capability' or 'complexity'.")
+    raw_profiles = data.get("profiles")
+    if not isinstance(raw_profiles, dict):
+        raise RuntimeError("profile weights file must contain a 'profiles' object.")
+
+    profiles: dict[str, dict[str, float]] = {}
+    for bucket, weights in raw_profiles.items():
+        if not isinstance(weights, dict):
+            raise RuntimeError(f"profile '{bucket}' must be an object of run weights.")
+        profiles[str(bucket)] = {str(name): float(weight) for name, weight in weights.items()}
+    return WeightProfile(field=field, profiles=profiles)
+
+
+def _record_bucket(record: EvalRecord, profile: WeightProfile) -> str:
+    if profile.field == "capability":
+        return str(record.capability or "None")
+    return str(record.complexity or "None")
+
+
+def _weights_for_record(
+    record: EvalRecord,
+    specs: list[RunSpec],
+    profile: WeightProfile | None,
+) -> tuple[dict[str, float], str | None]:
+    base_weights = {spec.name: spec.weight for spec in specs}
+    if profile is None:
+        return base_weights, None
+
+    bucket = _record_bucket(record, profile)
+    overrides = profile.profiles.get(bucket)
+    if not overrides:
+        return base_weights, bucket
+    weights = dict(base_weights)
+    weights.update(overrides)
+    return weights, bucket
+
+
 def _weighted_prediction(
     key: OccurrenceKey,
     valid_options: set[str],
     specs: list[RunSpec],
     runs: dict[str, dict[OccurrenceKey, dict[str, Any]]],
+    weights: dict[str, float],
 ) -> tuple[str | None, dict[str, Any]]:
     scores: Counter[str] = Counter()
     first_seen: dict[str, int] = {}
@@ -79,9 +129,10 @@ def _weighted_prediction(
         if prediction not in valid_options:
             prediction = None
         source_predictions[spec.name] = prediction
-        if prediction is None or spec.weight == 0:
+        weight = weights.get(spec.name, spec.weight)
+        if prediction is None or weight == 0:
             continue
-        scores[prediction] += spec.weight
+        scores[prediction] += weight
         first_seen.setdefault(prediction, index)
 
     if not scores:
@@ -94,6 +145,7 @@ def _weighted_prediction(
     return prediction, {
         "source_predictions": source_predictions,
         "weighted_votes": dict(scores),
+        "run_weights": {spec.name: weights.get(spec.name, spec.weight) for spec in specs},
         "selected_weight": best_score,
         "tie_break_order": [spec.name for spec in specs],
     }
@@ -106,12 +158,17 @@ def stack_runs(args: argparse.Namespace) -> dict[str, Any]:
 
     records = _read_records(args.dataset)
     runs = {spec.name: _read_results(spec.path) for spec in specs}
+    profile = _read_weight_profile(args.profile_weights)
 
     results: list[dict[str, Any]] = []
     seen_records: dict[str, int] = defaultdict(int)
     for record in records:
         key = _occurrence_key(record.uid, seen_records)
-        prediction, decision = _weighted_prediction(key, record.valid_options, specs, runs)
+        weights, profile_bucket = _weights_for_record(record, specs, profile)
+        prediction, decision = _weighted_prediction(key, record.valid_options, specs, runs, weights)
+        if profile_bucket is not None:
+            decision["profile_field"] = profile.field if profile else None
+            decision["profile_bucket"] = profile_bucket
         primary_item = next((runs[spec.name].get(key) for spec in specs if runs[spec.name].get(key)), None)
         item = dict(primary_item or {})
         item.update(
@@ -143,6 +200,11 @@ def stack_runs(args: argparse.Namespace) -> dict[str, Any]:
     metrics["stacking_runs"] = [
         {"name": spec.name, "path": str(spec.path), "weight": spec.weight} for spec in specs
     ]
+    if profile is not None:
+        metrics["weight_profile"] = {
+            "field": profile.field,
+            "profiles": profile.profiles,
+        }
     metrics_path = args.out.with_suffix(args.out.suffix + ".metrics.json")
     metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
@@ -159,6 +221,11 @@ def main() -> None:
         action="append",
         type=_parse_run_spec,
         help="Weighted run spec: NAME=PATH=WEIGHT. Ties are broken by --run order.",
+    )
+    parser.add_argument(
+        "--profile-weights",
+        type=Path,
+        help="Optional JSON file with per-capability or per-complexity run weight overrides.",
     )
     args = parser.parse_args()
     stack_runs(args)
