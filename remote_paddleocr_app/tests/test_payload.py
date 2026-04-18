@@ -6,7 +6,9 @@ from remote_paddleocr_app.paddleocr_client import file_type_to_api_value, infer_
 from remote_paddleocr_app.eval_pyfi import (
     PyFiRecord,
     build_choice_prompt,
+    build_structured_choice_prompt,
     collect_layout_blocks,
+    collect_structured_intermediate,
     normalize_answer,
     occurrence_keys,
 )
@@ -86,6 +88,56 @@ def test_collect_layout_blocks_includes_text_and_bbox() -> None:
     blocks = collect_layout_blocks(result)
     assert "text bbox=[10, 20, 80, 40]: Revenue 2024" in blocks
     assert "image bbox=[0, 0, 100, 100]" in blocks
+
+
+def test_collect_structured_intermediate_uses_remote_layout_result() -> None:
+    record = PyFiRecord(
+        uid="x",
+        image_path="a.jpg",
+        question="What is the difference in revenue between 2020 and 2021?",
+        options={"A": "10", "B": "20"},
+        answer="A",
+        capability="Calculation_analysis",
+        complexity="2",
+        context={"image_background": "A line chart."},
+    )
+    result = {
+        "layoutParsingResults": [
+            {
+                "prunedResult": {
+                    "parsing_res_list": [
+                        {
+                            "block_label": "text",
+                            "block_content": "2020 revenue 50; 2021 revenue 60",
+                            "block_bbox": [10, 20, 80, 40],
+                            "block_order": 1,
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    evidence = collect_structured_intermediate(record, result, "2020 revenue 50\n2021 revenue 60")
+    assert "option_evidence" in evidence
+    assert "numeric_candidates" in evidence
+    assert "2020 revenue 50" in evidence
+
+
+def test_build_structured_choice_prompt_omits_task_metadata() -> None:
+    record = PyFiRecord(
+        uid="x",
+        image_path="a.jpg",
+        question="Which option is correct?",
+        options={"A": "First", "B": "Second"},
+        answer="A",
+        capability="Perception",
+        complexity="1",
+        context={"image_background": "A chart."},
+    )
+    prompt = build_structured_choice_prompt(record, '{"evidence": "x"}')
+    assert "remote PaddleOCR-VL" in prompt
+    assert "Capability:" not in prompt
+    assert "Complexity:" not in prompt
 
 
 def test_occurrence_keys_preserve_duplicate_uids() -> None:

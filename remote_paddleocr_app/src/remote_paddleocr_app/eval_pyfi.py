@@ -149,6 +149,86 @@ def build_choice_prompt(record: PyFiRecord, markdown: str, layout_blocks: str = 
     return "\n".join(lines)
 
 
+def build_structured_choice_prompt(record: PyFiRecord, structured_evidence: str) -> str:
+    background = str(record.context.get("image_background") or "").strip()
+    return "\n".join(
+        [
+            "You answer multiple-choice questions about financial charts/documents.",
+            "All evidence below comes from the remote PaddleOCR-VL layout parsing API.",
+            "Use the structured intermediate evidence, the question, the options, and the image background together.",
+            "If evidence is incomplete, choose the option best supported by remote PaddleOCR-VL evidence.",
+            "Do not use option-letter priors and do not prefer an option because it appears earlier.",
+            "Choose exactly one valid option.",
+            'Return exactly JSON such as {"answer":"A"}.',
+            "Do not return explanations, markdown, or extra text.",
+            "",
+            "Question:",
+            record.question,
+            "",
+            "Options:",
+            json.dumps(record.options, ensure_ascii=False),
+            "",
+            "Image background:",
+            background,
+            "",
+            "Remote PaddleOCR-VL structured intermediate:",
+            trim(structured_evidence, 18000),
+        ]
+    )
+
+
+def collect_structured_intermediate(record: PyFiRecord, result: dict[str, Any], markdown: str) -> str:
+    query_text = " ".join([record.question, *record.options.values()])
+    query_tokens = keywords(query_text)
+    query_numbers = set(number_strings(query_text))
+    lines = collect_structured_lines(result, markdown)
+    scored = [
+        {
+            "source": source,
+            "score": score_text(text, query_tokens, query_numbers),
+            "text": text,
+        }
+        for source, text in lines
+    ]
+    relevant = [item for item in sorted(scored, key=lambda row: row["score"], reverse=True) if item["score"] > 0]
+    if len(relevant) < 16:
+        relevant = sorted(scored, key=lambda row: row["score"], reverse=True)
+    evidence_text = "\n".join(text for _, text in lines)
+    payload = {
+        "question_focus": {
+            "keywords": sorted(query_tokens)[:40],
+            "numbers": sorted(query_numbers),
+        },
+        "option_evidence": structured_option_evidence(record, evidence_text),
+        "numeric_candidates": numeric_candidates(record, relevant[:40]),
+        "relevant_remote_paddleocr_rows": relevant[:32],
+        "remote_paddleocr_markdown_excerpt": trim(markdown, 5000),
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def collect_structured_lines(result: dict[str, Any], markdown: str) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    for document_index, res in enumerate(result.get("layoutParsingResults", [])):
+        pruned = res.get("prunedResult") or {}
+        blocks = pruned.get("parsing_res_list") or []
+        if isinstance(blocks, list):
+            for block in sorted(blocks, key=layout_block_sort_key):
+                if not isinstance(block, dict):
+                    continue
+                label = str(block.get("block_label") or "unknown")
+                bbox = block.get("block_bbox") or block.get("bbox") or []
+                content = " ".join(str(block.get("block_content") or "").split())
+                if not content:
+                    continue
+                rows.append((f"layout_block_{document_index}_{label}", f"{label} bbox={bbox}: {content}"))
+    for line in markdown.splitlines():
+        text = " ".join(line.split())
+        if text and text not in {"|", "-"}:
+            rows.append(("markdown", text))
+    return rows[:240]
+
+
 def collect_layout_blocks(result: dict[str, Any]) -> str:
     lines: list[str] = []
     for document_index, res in enumerate(result.get("layoutParsingResults", [])):
@@ -180,6 +260,128 @@ def layout_block_sort_key(block: dict[str, Any]) -> tuple[int, int, int]:
     if isinstance(bbox, list) and len(bbox) >= 2:
         return (1, int(bbox[1]), int(bbox[0]))
     return (2, 0, 0)
+
+
+def structured_option_evidence(record: PyFiRecord, evidence_text: str) -> list[dict[str, Any]]:
+    evidence_lower = evidence_text.lower()
+    rows: list[dict[str, Any]] = []
+    for letter, option in record.options.items():
+        option_text = str(option)
+        option_tokens = keywords(option_text)
+        option_numbers = number_strings(option_text)
+        rows.append(
+            {
+                "option": letter,
+                "text": option_text,
+                "exact_text_in_remote_paddleocr": option_text.strip().lower() in evidence_lower
+                if option_text.strip()
+                else False,
+                "keyword_hits": sorted(token for token in option_tokens if token in evidence_lower),
+                "number_hits": [number for number in option_numbers if number in evidence_text],
+            }
+        )
+    return rows
+
+
+def numeric_candidates(record: PyFiRecord, relevant: list[dict[str, Any]]) -> list[str]:
+    question = record.question.lower()
+    option_values = {
+        letter: [parse_number(num) for num in number_strings(text)]
+        for letter, text in record.options.items()
+    }
+    option_values = {letter: [num for num in values if num is not None] for letter, values in option_values.items()}
+    evidence_values: list[tuple[float, str]] = []
+    for row in relevant:
+        text = str(row.get("text") or "")
+        for raw in number_strings(text):
+            value = parse_number(raw)
+            if value is not None:
+                evidence_values.append((value, text))
+    evidence_values = evidence_values[:80]
+
+    candidates: list[tuple[float, str]] = []
+    if any(word in question for word in ["percentage decrease", "percent decrease", "decrease"]):
+        for old, old_line in evidence_values:
+            if old == 0:
+                continue
+            for new, new_line in evidence_values:
+                pct = ((old - new) / abs(old)) * 100
+                append_option_matches(candidates, option_values, pct, f"percentage_decrease {old:g} -> {new:g} = {pct:.2f}% | {old_line} / {new_line}")
+    if any(word in question for word in ["percentage increase", "percent increase", "increase", "growth"]):
+        for old, old_line in evidence_values:
+            if old == 0:
+                continue
+            for new, new_line in evidence_values:
+                pct = ((new - old) / abs(old)) * 100
+                append_option_matches(candidates, option_values, pct, f"percentage_increase {old:g} -> {new:g} = {pct:.2f}% | {old_line} / {new_line}")
+    if any(word in question for word in ["difference", "change"]):
+        for left, left_line in evidence_values:
+            for right, right_line in evidence_values:
+                diff = left - right
+                append_option_matches(candidates, option_values, diff, f"difference {left:g} - {right:g} = {diff:.2f} | {left_line} / {right_line}")
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for _, text in sorted(candidates, key=lambda item: item[0])[:12]:
+        if text not in seen:
+            deduped.append(text)
+            seen.add(text)
+    return deduped
+
+
+def append_option_matches(
+    candidates: list[tuple[float, str]],
+    option_values: dict[str, list[float]],
+    computed: float,
+    description: str,
+) -> None:
+    for letter, values in option_values.items():
+        for option_value in values:
+            tolerance = max(0.75, abs(option_value) * 0.025)
+            delta = abs(computed - option_value)
+            if delta <= tolerance:
+                candidates.append((delta, f"matches option {letter}: {description}"))
+
+
+def score_text(text: str, query_tokens: set[str], query_numbers: set[str]) -> int:
+    lowered = text.lower()
+    line_tokens = keywords(text)
+    number_hits = sum(4 for number in query_numbers if number and number in text)
+    token_hits = sum(1 for token in query_tokens if token in line_tokens or token in lowered)
+    unit_bonus = 2 if re.search(r"[%$€£¥]|percent|percentage|ratio|rate|gdp|revenue|profit|debt", lowered) else 0
+    return token_hits + number_hits + unit_bonus
+
+
+def keywords(text: str) -> set[str]:
+    stop = {
+        "the",
+        "and",
+        "for",
+        "from",
+        "with",
+        "which",
+        "what",
+        "this",
+        "that",
+        "shown",
+        "based",
+        "option",
+        "into",
+        "without",
+    }
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9_+-]*|[\u4e00-\u9fff]{2,}", text.lower())
+    return {token for token in tokens if len(token) > 2 and token not in stop}
+
+
+def number_strings(text: str) -> list[str]:
+    return re.findall(r"(?<![A-Za-z])-?\d[\d,]*(?:\.\d+)?%?", text)
+
+
+def parse_number(raw: str) -> float | None:
+    try:
+        return float(raw.replace(",", "").rstrip("%"))
+    except ValueError:
+        return None
 
 
 def trim(text: str, limit: int) -> str:
@@ -325,8 +527,12 @@ def evaluate(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
                     base_sleep=args.retry_base_sleep,
                 )
                 markdown = collect_markdown(parsed)
-                layout_blocks = collect_layout_blocks(parsed) if args.include_layout_blocks else ""
-                prompt = build_choice_prompt(record, markdown, layout_blocks)
+                if args.structured_intermediate:
+                    structured_evidence = collect_structured_intermediate(record, parsed, markdown)
+                    prompt = build_structured_choice_prompt(record, structured_evidence)
+                else:
+                    layout_blocks = collect_layout_blocks(parsed) if args.include_layout_blocks else ""
+                    prompt = build_choice_prompt(record, markdown, layout_blocks)
                 raw_answer = with_retries(
                     lambda: ernie.complete(
                         prompt,
@@ -374,6 +580,7 @@ def evaluate(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
     }
     metrics["ernie_model"] = args.ernie_model or settings.ernie_model
     metrics["eval_runtime"] = {
+        "structured_intermediate": args.structured_intermediate,
         "include_layout_blocks": args.include_layout_blocks,
         "max_completion_tokens": args.max_completion_tokens,
         "temperature": args.temperature,
@@ -422,6 +629,7 @@ def add_eval_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     parser.add_argument("--use-doc-unwarping", action="store_true")
     parser.add_argument("--use-chart-recognition", action="store_true")
     parser.add_argument("--include-layout-blocks", action="store_true")
+    parser.add_argument("--structured-intermediate", action="store_true")
     parser.add_argument("--progress-every", type=int, default=10)
 
 
