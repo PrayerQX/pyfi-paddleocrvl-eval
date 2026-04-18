@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .models import build_adapter, normalize_prediction
-from .prompts import build_mcq_prompt
+from .prompts import PROMPT_STYLES, build_mcq_prompt
 from .pyfi import iter_jsonl, iter_pyfi_csv
 from .records import EvalRecord
 from .scoring import aggregate
@@ -67,7 +67,11 @@ def run(args: argparse.Namespace) -> dict:
                 if args.require_image and not image_path.exists():
                     continue
 
-                prompt = build_mcq_prompt(record, context_mode=args.context_mode)
+                prompt = build_mcq_prompt(
+                    record,
+                    context_mode=args.context_mode,
+                    prompt_style=args.prompt_style,
+                )
                 try:
                     raw_prediction = adapter.predict(record, image_path, prompt)
                     error = None
@@ -114,6 +118,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--require-image", action="store_true")
     parser.add_argument("--context-mode", default="image_background_only")
+    parser.add_argument("--prompt-style", choices=sorted(PROMPT_STYLES), default="direct")
     parser.add_argument("--progress-every", type=int, default=25)
 
     parser.add_argument(
@@ -126,6 +131,7 @@ def main() -> None:
             "paddleocr-vl-docqa",
             "paddleocr-vl-hybrid-docqa",
             "paddleocr-vl-grounded-docqa",
+            "paddleocr-vl-structured-docqa",
             "paddleocr-vl-boosted-docqa",
         ],
         default="first-option",

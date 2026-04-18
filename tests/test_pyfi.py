@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from finvl_eval.evidence import build_structured_intermediate
+from finvl_eval.prepare_pyfi_sft import build_training_example, looks_like_eval_split
 from finvl_eval.prompts import build_mcq_prompt
 from finvl_eval.pyfi import extract_gold_answer, iter_pyfi_csv, write_jsonl
 from finvl_eval.records import EvalRecord
@@ -51,6 +53,8 @@ class PromptAndScoringTests(unittest.TestCase):
         )
         prompt = build_mcq_prompt(record)
         self.assertIn("Background", prompt)
+        pyramid_prompt = build_mcq_prompt(record, prompt_style="pyramid")
+        self.assertIn("pyramid procedure", pyramid_prompt)
         self.assertEqual(normalize_answer("The answer is B.", record.valid_options), "B")
         self.assertEqual(normalize_answer('{"answer":"B"}', record.valid_options), "B")
         self.assertEqual(normalize_answer('```json\n{"answer":"B"}\n```', record.valid_options), "B")
@@ -88,6 +92,35 @@ class PromptAndScoringTests(unittest.TestCase):
             self.assertEqual(count, 1)
             data = json.loads(out.read_text(encoding="utf-8"))
             self.assertEqual(data["answer"], "A")
+
+    def test_structured_intermediate_from_paddle_markdown(self) -> None:
+        record = EvalRecord(
+            uid="1",
+            image_path="./images/a.jpg",
+            question="What is the difference in revenue between 2020 and 2021?",
+            options={"A": "10", "B": "20"},
+            answer="A",
+        )
+        markdown = "<table><tr><th>Year</th><th>Revenue</th></tr><tr><td>2020</td><td>50</td></tr><tr><td>2021</td><td>60</td></tr></table>"
+        bundle = build_structured_intermediate(record, markdown)
+        self.assertIn("option_evidence", bundle.text)
+        self.assertIn("2020", bundle.text)
+        self.assertGreaterEqual(bundle.stats["table_rows"], 1)
+
+    def test_prepare_sft_example_and_eval_guard(self) -> None:
+        record = EvalRecord(
+            uid="1",
+            image_path="./images/a.jpg",
+            question="Pick one.",
+            options={"A": "Alpha", "B": "Beta"},
+            answer="B",
+            context={"image_background": "Background"},
+        )
+        example = build_training_example(record, mode="final-only", prompt_style="pyramid", images_root=None)
+        self.assertIsNotNone(example)
+        assert example is not None
+        self.assertEqual(example["messages"][1]["content"], "B")
+        self.assertTrue(looks_like_eval_split(Path("pyfi_eval_301.jsonl")))
 
 
 if __name__ == "__main__":

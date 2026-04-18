@@ -20,6 +20,7 @@ finvl-eval = "finvl_eval.runner:main"
 finvl-sample-pyfi = "finvl_eval.sample_pyfi:main"
 finvl-download-pyfi = "finvl_eval.download_pyfi:main"
 finvl-audit-invalid = "finvl_eval.audit_invalid:main"
+finvl-prepare-pyfi-sft = "finvl_eval.prepare_pyfi_sft:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

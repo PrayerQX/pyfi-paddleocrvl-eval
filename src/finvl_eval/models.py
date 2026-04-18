@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 from typing import Any, Protocol
 
-from .evidence import build_grounded_evidence
+from .evidence import build_grounded_evidence, build_structured_intermediate
 from .records import EvalRecord
 from .scoring import normalize_answer
 
@@ -660,6 +660,50 @@ class PaddleOCRVLGroundedDocQAAdapter(PaddleOCRVLHybridDocQAAdapter):
         return _valid_or_fallback(record, raw, evidence.text)
 
 
+class PaddleOCRVLStructuredDocQAAdapter(PaddleOCRVLDocQAAdapter):
+    """
+    Two-stage PaddleOCR-VL experiment.
+
+    Stage A converts PaddleOCR-VL markdown into a fixed structured
+    intermediate representation: option evidence, numeric candidates, relevant
+    rows, and a raw markdown excerpt. Stage B asks the selector to answer only
+    from that structured PaddleOCR-VL evidence.
+    """
+
+    name = "paddleocr-vl-1.5-structured-docqa"
+
+    def _select_with_openai(self, record: EvalRecord, parsed_markdown: str) -> str | None:
+        if not self.selector_api_key:
+            raise RuntimeError("FINVL_SELECTOR_API_KEY or OPENAI_API_KEY is required when FINVL_SELECTOR_MODEL is set.")
+        from openai import OpenAI
+
+        client = OpenAI(
+            api_key=self.selector_api_key,
+            base_url=(self.selector_base_url or "https://api.openai.com/v1"),
+            timeout=120,
+        )
+        intermediate = build_structured_intermediate(record, parsed_markdown)
+        selector_prompt = _build_structured_selector_prompt(record, intermediate.text)
+        raw = _chat_completion_text(
+            client,
+            model=self.selector_model,
+            prompt=selector_prompt,
+            temperature=0.0,
+            max_tokens=max(self.selector_max_tokens, 512),
+            stream=self.selector_stream,
+            extra_body=self.selector_extra_body,
+            use_max_completion_tokens=self.selector_use_max_completion_tokens,
+            security_ctx=self._security_ctx,
+            uid=record.uid,
+            adapter_name=self.name,
+        )
+        prediction = normalize_answer(raw, record.valid_options)
+        vetoed = _apply_veto(self._veto_config, prediction, record, intermediate.text, raw)
+        if vetoed is not None:
+            return vetoed
+        return _valid_or_fallback(record, raw, intermediate.text)
+
+
 def _apply_veto(
     veto_config: Any | None,
     prediction: str | None,
@@ -780,6 +824,21 @@ def build_adapter(args: Any) -> ModelAdapter:
             selector_base_url=getattr(args, "selector_base_url", None),
             artifacts_dir=args.artifacts_dir,
             ocr_artifacts_dir=getattr(args, "ocr_artifacts_dir", None),
+            vl_rec_backend=args.paddle_vl_backend,
+            vl_rec_server_url=args.paddle_vl_server_url,
+            vl_rec_model_dir=args.paddle_vl_model_dir,
+            selector_stream=getattr(args, "selector_stream", None),
+            selector_extra_body=_parse_extra_body_arg(getattr(args, "selector_extra_body_json", None)),
+            selector_max_tokens=getattr(args, "selector_max_tokens", None),
+            selector_use_max_completion_tokens=getattr(args, "selector_use_max_completion_tokens", None),
+            security_ctx=security_ctx,
+            veto_config=veto_config,
+        )
+    if args.model == "paddleocr-vl-structured-docqa":
+        return PaddleOCRVLStructuredDocQAAdapter(
+            selector_model=args.selector_model,
+            selector_base_url=getattr(args, "selector_base_url", None),
+            artifacts_dir=args.artifacts_dir,
             vl_rec_backend=args.paddle_vl_backend,
             vl_rec_server_url=args.paddle_vl_server_url,
             vl_rec_model_dir=args.paddle_vl_model_dir,
@@ -989,6 +1048,32 @@ def _build_grounded_selector_prompt(
             _trim_text(ocr_text, 5000),
         ]
     )
+
+
+def _build_structured_selector_prompt(record: EvalRecord, structured_evidence: str) -> str:
+    option_letters = ", ".join(record.options.keys())
+    sections = [
+        "You answer financial chart/document multiple-choice questions.",
+        "All evidence below was produced by PaddleOCR-VL stage A.",
+        "Use the structured evidence, numeric candidates, relevant rows, and markdown excerpt together.",
+        "If evidence is incomplete, choose the option best supported by the available PaddleOCR-VL evidence.",
+        "Do not use option-letter priors and do not prefer an option because it appears earlier.",
+        'Return exactly JSON such as {"answer":"A"}.',
+        "Do not return explanations, markdown, or extra text.",
+        "",
+        f"Valid letters: {option_letters}",
+        "",
+        "Question:",
+        record.question,
+        "",
+        "Options:",
+        json.dumps(record.options, ensure_ascii=False),
+    ]
+    background = record.context.get("image_background")
+    if background:
+        sections.extend(["", "Image background:", _trim_text(str(background), 3000)])
+    sections.extend(["", "PaddleOCR-VL structured intermediate:", _trim_text(structured_evidence, 16000)])
+    return "\n".join(sections)
 
 
 def _valid_or_fallback(record: EvalRecord, raw_prediction: str | None, evidence_text: str) -> str | None:

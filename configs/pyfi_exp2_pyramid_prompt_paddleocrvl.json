@@ -1,0 +1,36 @@
+{
+  "experiment": "exp2_pyramid_prompt",
+  "purpose": "Direct image VQA with a fixed PyFi-style perception-extraction-reasoning-answer prompt.",
+  "academic_controls": [
+    "single pass",
+    "no answer fallback",
+    "no capability-specific branching",
+    "same pyramid procedure for every sample"
+  ],
+  "command": [
+    "python",
+    "-m",
+    "finvl_eval.runner",
+    "--dataset",
+    "data/pyfi/pyfi_eval_301.jsonl",
+    "--format",
+    "jsonl",
+    "--images-root",
+    "data/pyfi",
+    "--model",
+    "openai-compatible-vlm",
+    "--openai-model",
+    "<paddleocr-vl-vlm-endpoint-model>",
+    "--prompt-style",
+    "pyramid",
+    "--out",
+    "runs/pyfi_exp2_pyramid_prompt_paddleocrvl.jsonl",
+    "--require-image",
+    "--progress-every",
+    "25"
+  ],
+  "environment": {
+    "OPENAI_API_KEY": "set at runtime",
+    "OPENAI_BASE_URL": "set at runtime"
+  }
+}

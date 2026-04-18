@@ -1,0 +1,48 @@
+{
+  "experiment": "exp4_lora_sft",
+  "purpose": "Prepare PyFi training records for PaddleOCR-VL LoRA/SFT experiments.",
+  "academic_controls": [
+    "do not train on pyfi_eval_301.jsonl",
+    "report train/eval split hashes",
+    "run w/o CoT and w/ CoT variants separately",
+    "keep PyFi local split and official leaderboard claims separate"
+  ],
+  "prepare_final_only_command": [
+    "python",
+    "-m",
+    "finvl_eval.prepare_pyfi_sft",
+    "--dataset",
+    "data/pyfi/PyFi-600K-dataset.csv",
+    "--format",
+    "pyfi-csv",
+    "--images-root",
+    "data/pyfi",
+    "--mode",
+    "final-only",
+    "--prompt-style",
+    "pyramid",
+    "--out",
+    "runs/sft/pyfi_final_only_train.jsonl"
+  ],
+  "prepare_cot_command": [
+    "python",
+    "-m",
+    "finvl_eval.prepare_pyfi_sft",
+    "--dataset",
+    "data/pyfi/PyFi-600K-chain-train.jsonl",
+    "--format",
+    "jsonl",
+    "--images-root",
+    "data/pyfi",
+    "--mode",
+    "cot-from-metadata",
+    "--prompt-style",
+    "pyramid",
+    "--out",
+    "runs/sft/pyfi_cot_train.jsonl"
+  ],
+  "notes": [
+    "The CoT command expects chain/COT fields in record metadata.",
+    "This repository prepares data only; actual LoRA training should live in a dedicated training environment."
+  ]
+}

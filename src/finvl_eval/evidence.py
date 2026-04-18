@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -114,6 +115,55 @@ def build_grounded_evidence(record: EvalRecord, parsed_markdown: str, ocr_text: 
     return EvidenceBundle(text="\n".join(sections), stats=stats)
 
 
+def build_structured_intermediate(record: EvalRecord, parsed_markdown: str) -> EvidenceBundle:
+    """
+    Build a fixed structured representation from PaddleOCR-VL markdown.
+
+    This is the stage-A output for the two-stage PyFi experiment. It uses only
+    the question/options as retrieval hints and does not use gold answers,
+    capability labels, or option-letter priors.
+    """
+
+    query_text = " ".join([record.question, *record.options.values()])
+    query_tokens = _keywords(query_text)
+    query_numbers = set(_number_strings(query_text))
+
+    table_lines = _table_lines(parsed_markdown)
+    text_lines = _plain_lines(_strip_html_tables(parsed_markdown), "paddle_vl_markdown")
+    all_lines = table_lines + text_lines
+    scored = [
+        EvidenceLine(line.source, line.text, _score_text(line.text, query_tokens, query_numbers))
+        for line in all_lines
+    ]
+    relevant = [line for line in sorted(scored, key=lambda item: item.score, reverse=True) if line.score > 0]
+    if len(relevant) < 16:
+        relevant = sorted(scored, key=lambda item: item.score, reverse=True)
+
+    payload = {
+        "question_focus": {
+            "keywords": sorted(query_tokens)[:40],
+            "numbers": sorted(query_numbers),
+        },
+        "option_evidence": _structured_option_evidence(record, "\n".join(line.text for line in all_lines)),
+        "numeric_candidates": _numeric_candidates(record, relevant[:40]),
+        "relevant_paddle_vl_rows": [
+            {
+                "source": line.source,
+                "score": line.score,
+                "text": line.text,
+            }
+            for line in relevant[:32]
+        ],
+        "raw_paddle_vl_markdown_excerpt": _trim(parsed_markdown, 5000),
+    }
+    stats = {
+        "table_rows": len(table_lines),
+        "markdown_lines": len(text_lines),
+        "relevant_rows": len(relevant),
+    }
+    return EvidenceBundle(text=json.dumps(payload, ensure_ascii=False, indent=2), stats=stats)
+
+
 def _route(record: EvalRecord) -> str:
     question = record.question.lower()
     capability = (record.capability or "").lower()
@@ -183,6 +233,27 @@ def _option_evidence(record: EvalRecord, evidence_text: str, relevant: list[Evid
             f"exact_in_paddle={exact_hit}; "
             f"keyword_hits_in_relevant={relevant_hits}; "
             f"number_hits={number_hits}"
+        )
+    return rows
+
+
+def _structured_option_evidence(record: EvalRecord, evidence_text: str) -> list[dict[str, object]]:
+    evidence_lower = evidence_text.lower()
+    rows: list[dict[str, object]] = []
+    for letter, option in record.options.items():
+        option_text = str(option)
+        option_tokens = _keywords(option_text)
+        option_numbers = _number_strings(option_text)
+        rows.append(
+            {
+                "option": letter,
+                "text": option_text,
+                "exact_text_in_paddle_vl": option_text.strip().lower() in evidence_lower
+                if option_text.strip()
+                else False,
+                "keyword_hits": sorted(token for token in option_tokens if token in evidence_lower),
+                "number_hits": [number for number in option_numbers if number in evidence_text],
+            }
         )
     return rows
 

@@ -1,0 +1,41 @@
+{
+  "experiment": "exp3_structured_two_stage",
+  "purpose": "Use PaddleOCR-VL as a structure engine, then answer from its structured intermediate representation.",
+  "academic_controls": [
+    "PaddleOCR-VL stage A uses no gold answer",
+    "selector sees the same structured schema for every sample",
+    "no capability-specific branching",
+    "no option-letter priors"
+  ],
+  "command": [
+    "python",
+    "-m",
+    "finvl_eval.runner",
+    "--dataset",
+    "data/pyfi/pyfi_eval_301.jsonl",
+    "--format",
+    "jsonl",
+    "--images-root",
+    "data/pyfi",
+    "--model",
+    "paddleocr-vl-structured-docqa",
+    "--selector-model",
+    "ernie-4.5-turbo-128k-preview",
+    "--selector-base-url",
+    "https://aistudio.baidu.com/llm/lmapi/v3",
+    "--selector-stream",
+    "--selector-use-max-completion-tokens",
+    "--selector-max-tokens",
+    "512",
+    "--artifacts-dir",
+    "runs/pyfi_exp3_structured_paddleocrvl_artifacts",
+    "--out",
+    "runs/pyfi_exp3_structured_two_stage_ernie45.jsonl",
+    "--require-image",
+    "--progress-every",
+    "25"
+  ],
+  "environment": {
+    "FINVL_SELECTOR_API_KEY": "set at runtime"
+  }
+}
