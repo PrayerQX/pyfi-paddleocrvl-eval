@@ -5,6 +5,8 @@ from pathlib import Path
 from remote_paddleocr_app.paddleocr_client import file_type_to_api_value, infer_file_type
 from remote_paddleocr_app.eval_pyfi import (
     PyFiRecord,
+    build_choice_prompt,
+    collect_layout_blocks,
     normalize_answer,
     occurrence_keys,
 )
@@ -41,6 +43,51 @@ def test_normalize_answer_from_text() -> None:
     assert normalize_answer("Answer: C", {"A", "B", "C"}) == "C"
 
 
+def test_build_choice_prompt_omits_task_metadata() -> None:
+    record = PyFiRecord(
+        uid="x",
+        image_path="a.jpg",
+        question="Which option has the largest increase?",
+        options={"A": "First", "B": "Second"},
+        answer="A",
+        capability="Calculation_analysis",
+        complexity="5",
+        context={"image_background": "A line chart."},
+    )
+    prompt = build_choice_prompt(record, "table evidence")
+    assert "remote PaddleOCR Markdown" in prompt
+    assert "Capability:" not in prompt
+    assert "Complexity:" not in prompt
+
+
+def test_collect_layout_blocks_includes_text_and_bbox() -> None:
+    result = {
+        "layoutParsingResults": [
+            {
+                "prunedResult": {
+                    "parsing_res_list": [
+                        {
+                            "block_label": "text",
+                            "block_content": "Revenue 2024",
+                            "block_bbox": [10, 20, 80, 40],
+                            "block_order": 2,
+                        },
+                        {
+                            "block_label": "image",
+                            "block_content": "",
+                            "block_bbox": [0, 0, 100, 100],
+                            "block_order": None,
+                        },
+                    ]
+                }
+            }
+        ]
+    }
+    blocks = collect_layout_blocks(result)
+    assert "text bbox=[10, 20, 80, 40]: Revenue 2024" in blocks
+    assert "image bbox=[0, 0, 100, 100]" in blocks
+
+
 def test_occurrence_keys_preserve_duplicate_uids() -> None:
     records = [
         PyFiRecord("x", "a.jpg", "q", {"A": "a"}, "A", None, None, {}),
@@ -48,4 +95,3 @@ def test_occurrence_keys_preserve_duplicate_uids() -> None:
         PyFiRecord("y", "b.jpg", "q", {"A": "a"}, "A", None, None, {}),
     ]
     assert occurrence_keys(records) == [("x", 0), ("x", 1), ("y", 0)]
-

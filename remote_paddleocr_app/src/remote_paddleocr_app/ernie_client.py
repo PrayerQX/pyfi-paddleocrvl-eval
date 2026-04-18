@@ -19,15 +19,20 @@ class ErnieClient:
         max_completion_tokens: int = 65536,
         stream: bool = True,
         include_reasoning: bool = False,
+        temperature: float | None = None,
     ) -> str:
         messages = [{"role": "user", "content": prompt}]
         extra_body = {"web_search": {"enable": web_search}}
+        kwargs: dict[str, Any] = {}
+        if temperature is not None:
+            kwargs["temperature"] = temperature
         completion = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
             stream=stream,
             extra_body=extra_body,
             max_completion_tokens=max_completion_tokens,
+            **kwargs,
         )
         if stream:
             return collect_stream(completion, include_reasoning=include_reasoning)

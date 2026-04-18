@@ -115,31 +115,71 @@ def read_or_parse(
     return result
 
 
-def build_choice_prompt(record: PyFiRecord, markdown: str) -> str:
+def build_choice_prompt(record: PyFiRecord, markdown: str, layout_blocks: str = "") -> str:
     background = str(record.context.get("image_background") or "").strip()
-    return "\n".join(
-        [
-            "You answer multiple-choice questions about financial charts/documents.",
-            "Use the remote PaddleOCR Markdown, the question, the options, and the image background together.",
-            "The OCR may contain garbled multilingual text; rely on numeric values, table structure, labels, and the image background.",
-            "Do not prefer an option just because it appears earlier or because the OCR text is noisy.",
-            "Choose exactly one valid option.",
-            'Return exactly JSON such as {"answer":"A"}.',
-            "Do not return explanations, markdown, or extra text.",
-            "",
-            "Question:",
-            record.question,
-            "",
-            "Options:",
-            json.dumps(record.options, ensure_ascii=False),
-            "",
-            "Image background:",
-            background,
-            "",
-            "Remote PaddleOCR Markdown:",
-            trim(markdown, 10000),
-        ]
-    )
+    lines = [
+        "You answer multiple-choice questions about financial charts/documents.",
+        "Use the remote PaddleOCR Markdown, the question, the options, and the image background together.",
+        "The OCR may contain garbled multilingual text; rely on numeric values, table structure, labels, and the image background.",
+        "Do not prefer an option just because it appears earlier or because the OCR text is noisy.",
+        "Choose exactly one valid option.",
+        'Return exactly JSON such as {"answer":"A"}.',
+        "Do not return explanations, markdown, or extra text.",
+        "",
+        "Question:",
+        record.question,
+        "",
+        "Options:",
+        json.dumps(record.options, ensure_ascii=False),
+        "",
+        "Image background:",
+        background,
+        "",
+        "Remote PaddleOCR Markdown:",
+        trim(markdown, 10000),
+    ]
+    if layout_blocks.strip():
+        lines.extend(
+            [
+                "",
+                "Remote PaddleOCR layout blocks:",
+                trim(layout_blocks, 6000),
+            ]
+        )
+    return "\n".join(lines)
+
+
+def collect_layout_blocks(result: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for document_index, res in enumerate(result.get("layoutParsingResults", [])):
+        pruned = res.get("prunedResult") or {}
+        blocks = pruned.get("parsing_res_list") or []
+        if not isinstance(blocks, list):
+            continue
+        lines.append(f"# Document {document_index} layout blocks")
+        for block in sorted(blocks, key=layout_block_sort_key):
+            if not isinstance(block, dict):
+                continue
+            label = str(block.get("block_label") or "unknown")
+            bbox = block.get("block_bbox") or block.get("bbox") or []
+            content = " ".join(str(block.get("block_content") or "").split())
+            if not content and label not in {"table", "chart", "image"}:
+                continue
+            if content:
+                lines.append(f"- {label} bbox={bbox}: {trim(content, 240)}")
+            else:
+                lines.append(f"- {label} bbox={bbox}")
+    return "\n".join(lines)
+
+
+def layout_block_sort_key(block: dict[str, Any]) -> tuple[int, int, int]:
+    order = block.get("block_order")
+    if isinstance(order, int):
+        return (0, order, 0)
+    bbox = block.get("block_bbox") or []
+    if isinstance(bbox, list) and len(bbox) >= 2:
+        return (1, int(bbox[1]), int(bbox[0]))
+    return (2, 0, 0)
 
 
 def trim(text: str, limit: int) -> str:
@@ -285,7 +325,8 @@ def evaluate(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
                     base_sleep=args.retry_base_sleep,
                 )
                 markdown = collect_markdown(parsed)
-                prompt = build_choice_prompt(record, markdown)
+                layout_blocks = collect_layout_blocks(parsed) if args.include_layout_blocks else ""
+                prompt = build_choice_prompt(record, markdown, layout_blocks)
                 raw_answer = with_retries(
                     lambda: ernie.complete(
                         prompt,
@@ -293,6 +334,7 @@ def evaluate(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
                         max_completion_tokens=args.max_completion_tokens,
                         stream=True,
                         include_reasoning=False,
+                        temperature=args.temperature,
                     ),
                     attempts=args.retry_attempts,
                     base_sleep=args.retry_base_sleep,
@@ -332,7 +374,9 @@ def evaluate(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
     }
     metrics["ernie_model"] = args.ernie_model or settings.ernie_model
     metrics["eval_runtime"] = {
+        "include_layout_blocks": args.include_layout_blocks,
         "max_completion_tokens": args.max_completion_tokens,
+        "temperature": args.temperature,
         "retry_attempts": args.retry_attempts,
         "retry_base_sleep": args.retry_base_sleep,
         "sleep_between_records": args.sleep_between_records,
@@ -368,6 +412,7 @@ def add_eval_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     parser.add_argument("--limit", type=int)
     parser.add_argument("--ernie-model")
     parser.add_argument("--max-completion-tokens", type=int, default=512)
+    parser.add_argument("--temperature", type=float)
     parser.add_argument("--retry-attempts", type=int, default=3)
     parser.add_argument("--retry-base-sleep", type=float, default=3.0)
     parser.add_argument("--sleep-between-records", type=float, default=0.0)
@@ -376,6 +421,7 @@ def add_eval_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     parser.add_argument("--use-doc-orientation-classify", action="store_true")
     parser.add_argument("--use-doc-unwarping", action="store_true")
     parser.add_argument("--use-chart-recognition", action="store_true")
+    parser.add_argument("--include-layout-blocks", action="store_true")
     parser.add_argument("--progress-every", type=int, default=10)
 
 
