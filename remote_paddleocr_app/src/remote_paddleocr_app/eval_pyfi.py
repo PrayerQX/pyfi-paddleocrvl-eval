@@ -372,13 +372,6 @@ def evaluate(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
             except Exception as exc:  # pragma: no cover - integration path
                 error = f"{type(exc).__name__}: {exc}"
 
-            if prediction is None and args.fallback_first_option:
-                prediction = sorted(record.valid_options)[0]
-                if raw_answer:
-                    raw_answer = f"{raw_answer}\n\n[fallback_first_option={prediction}]"
-                else:
-                    raw_answer = f"[fallback_first_option={prediction}]"
-
             item = {
                 "uid": record.uid,
                 "image_path": str(image_path),
@@ -415,7 +408,6 @@ def evaluate(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
         "retry_base_sleep": args.retry_base_sleep,
         "sleep_between_records": args.sleep_between_records,
         "include_reasoning_fallback": args.include_reasoning_fallback,
-        "fallback_first_option": args.fallback_first_option,
         "resume": args.resume,
     }
     metrics_path = args.out.with_suffix(args.out.suffix + ".metrics.json")
@@ -449,7 +441,6 @@ def add_eval_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     parser.add_argument("--ernie-model")
     parser.add_argument("--max-completion-tokens", type=int, default=512)
     parser.add_argument("--include-reasoning-fallback", action="store_true")
-    parser.add_argument("--fallback-first-option", action="store_true")
     parser.add_argument("--retry-attempts", type=int, default=3)
     parser.add_argument("--retry-base-sleep", type=float, default=3.0)
     parser.add_argument("--sleep-between-records", type=float, default=0.0)
