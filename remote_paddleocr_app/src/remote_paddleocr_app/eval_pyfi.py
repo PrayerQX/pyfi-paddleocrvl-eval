@@ -4,8 +4,10 @@ import argparse
 import hashlib
 import json
 import re
+import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -113,6 +115,72 @@ def read_or_parse(
     md_path = artifacts_dir / f"{safe_name(record.uid)}.md"
     md_path.write_text(collect_markdown(result), encoding="utf-8")
     return result
+
+
+def complete_with_cache(
+    ernie: ErnieClient,
+    args: argparse.Namespace,
+    prompt: str,
+) -> tuple[str, bool]:
+    cache_dir: Path | None = args.selector_cache_dir
+    web_search = not args.disable_web_search
+    if cache_dir is None:
+        return (
+            ernie.complete(
+                prompt,
+                web_search=web_search,
+                max_completion_tokens=args.max_completion_tokens,
+                stream=True,
+                include_reasoning=False,
+                temperature=args.temperature,
+            ),
+            False,
+        )
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"{selector_cache_key(args, prompt)}.json"
+    if cache_path.exists():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            raw = cached.get("raw")
+            if isinstance(raw, str):
+                return raw, True
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    raw = ernie.complete(
+        prompt,
+        web_search=web_search,
+        max_completion_tokens=args.max_completion_tokens,
+        stream=True,
+        include_reasoning=False,
+        temperature=args.temperature,
+    )
+    payload = {
+        "model": getattr(args, "_selector_model_name", None) or args.ernie_model,
+        "max_completion_tokens": args.max_completion_tokens,
+        "temperature": args.temperature,
+        "web_search": web_search,
+        "raw": raw,
+    }
+    tmp_path = cache_path.with_suffix(f".{threading.get_ident()}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(cache_path)
+    return raw, False
+
+
+def selector_cache_key(args: argparse.Namespace, prompt: str) -> str:
+    payload = {
+        "model": getattr(args, "_selector_model_name", None) or args.ernie_model,
+        "prompt": prompt,
+        "max_completion_tokens": args.max_completion_tokens,
+        "temperature": args.temperature,
+        "web_search": not args.disable_web_search,
+        "stream": True,
+        "include_reasoning": False,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def build_choice_prompt(record: PyFiRecord, markdown: str, layout_blocks: str = "") -> str:
@@ -469,6 +537,62 @@ def bucket(rows: list[dict[str, Any]], key: str) -> dict[str, dict[str, float | 
     return result
 
 
+def process_record(
+    args: argparse.Namespace,
+    paddle: PaddleOCRRemoteClient,
+    ernie: ErnieClient,
+    layout_options: LayoutOptions,
+    index: int,
+    record: PyFiRecord,
+) -> dict[str, Any]:
+    image_path = resolve_image_path(args.images_root, record.image_path)
+    error = None
+    raw_answer = None
+    prediction = None
+    selector_cache_hit = False
+    try:
+        parsed = with_retries(
+            lambda: read_or_parse(
+                paddle,
+                record,
+                image_path,
+                args.artifacts_dir,
+                layout_options,
+            ),
+            attempts=args.retry_attempts,
+            base_sleep=args.retry_base_sleep,
+        )
+        markdown = collect_markdown(parsed)
+        if args.structured_intermediate:
+            structured_evidence = collect_structured_intermediate(record, parsed, markdown)
+            prompt = build_structured_choice_prompt(record, structured_evidence)
+        else:
+            layout_blocks = collect_layout_blocks(parsed) if args.include_layout_blocks else ""
+            prompt = build_choice_prompt(record, markdown, layout_blocks)
+        raw_answer, selector_cache_hit = with_retries(
+            lambda: complete_with_cache(ernie, args, prompt),
+            attempts=args.retry_attempts,
+            base_sleep=args.retry_base_sleep,
+        )
+        prediction = normalize_answer(raw_answer, record.valid_options)
+    except Exception as exc:  # pragma: no cover - integration path
+        error = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "index": index,
+        "uid": record.uid,
+        "image_path": str(image_path),
+        "capability": record.capability,
+        "complexity": record.complexity,
+        "answer": record.answer,
+        "prediction": prediction,
+        "raw_prediction": raw_answer,
+        "selector_cache_hit": selector_cache_hit,
+        "correct": prediction == record.answer if record.answer else False,
+        "error": error,
+    }
+
+
 def evaluate(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
     records = iter_pyfi_jsonl(args.dataset)
     if args.limit is not None:
@@ -486,6 +610,7 @@ def evaluate(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
         model=args.ernie_model or settings.ernie_model,
         timeout=settings.timeout,
     )
+    args._selector_model_name = args.ernie_model or settings.ernie_model
     layout_options = LayoutOptions(
         use_doc_orientation_classify=args.use_doc_orientation_classify,
         use_doc_unwarping=args.use_doc_unwarping,
@@ -501,6 +626,7 @@ def evaluate(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
             if key in existing:
                 results.append(existing[key])
     with args.out.open(mode, encoding="utf-8") as handle:
+        pending: list[tuple[int, PyFiRecord, RecordKey]] = []
         for index, (record, record_key) in enumerate(zip(records, keys, strict=True), start=1):
             if record_key in existing:
                 if args.progress_every and index % args.progress_every == 0:
@@ -510,69 +636,42 @@ def evaluate(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
                         f"accuracy={metrics['accuracy']:.4f} invalid={metrics['invalid']}"
                     )
                 continue
-            image_path = resolve_image_path(args.images_root, record.image_path)
-            error = None
-            raw_answer = None
-            prediction = None
-            try:
-                parsed = with_retries(
-                    lambda: read_or_parse(
-                        paddle,
-                        record,
-                        image_path,
-                        args.artifacts_dir,
-                        layout_options,
-                    ),
-                    attempts=args.retry_attempts,
-                    base_sleep=args.retry_base_sleep,
-                )
-                markdown = collect_markdown(parsed)
-                if args.structured_intermediate:
-                    structured_evidence = collect_structured_intermediate(record, parsed, markdown)
-                    prompt = build_structured_choice_prompt(record, structured_evidence)
-                else:
-                    layout_blocks = collect_layout_blocks(parsed) if args.include_layout_blocks else ""
-                    prompt = build_choice_prompt(record, markdown, layout_blocks)
-                raw_answer = with_retries(
-                    lambda: ernie.complete(
-                        prompt,
-                        web_search=not args.disable_web_search,
-                        max_completion_tokens=args.max_completion_tokens,
-                        stream=True,
-                        include_reasoning=False,
-                        temperature=args.temperature,
-                    ),
-                    attempts=args.retry_attempts,
-                    base_sleep=args.retry_base_sleep,
-                )
-                prediction = normalize_answer(raw_answer, record.valid_options)
-            except Exception as exc:  # pragma: no cover - integration path
-                error = f"{type(exc).__name__}: {exc}"
+            pending.append((index, record, record_key))
 
-            item = {
-                "uid": record.uid,
-                "image_path": str(image_path),
-                "capability": record.capability,
-                "complexity": record.complexity,
-                "answer": record.answer,
-                "prediction": prediction,
-                "raw_prediction": raw_answer,
-                "correct": prediction == record.answer if record.answer else False,
-                "error": error,
-            }
+        def write_item(item: dict[str, Any]) -> None:
             handle.write(json.dumps(item, ensure_ascii=False) + "\n")
             handle.flush()
             results.append(item)
-            if args.sleep_between_records > 0:
+            if args.sleep_between_records > 0 and args.selector_concurrency <= 1:
                 time.sleep(args.sleep_between_records)
+            index = int(item["index"])
             if args.progress_every and index % args.progress_every == 0:
                 metrics = aggregate(results)
+                cache_hits = sum(1 for row in results if row.get("selector_cache_hit"))
                 print(
                     f"Processed {index}; correct={metrics['correct']}/{metrics['total']} "
-                    f"accuracy={metrics['accuracy']:.4f} invalid={metrics['invalid']}"
+                    f"accuracy={metrics['accuracy']:.4f} invalid={metrics['invalid']} "
+                    f"selector_cache_hits={cache_hits}"
                 )
 
+        if args.selector_concurrency <= 1:
+            for index, record, _record_key in pending:
+                write_item(process_record(args, paddle, ernie, layout_options, index, record))
+        else:
+            with ThreadPoolExecutor(max_workers=args.selector_concurrency) as executor:
+                mapped = executor.map(
+                    lambda item: process_record(args, paddle, ernie, layout_options, item[0], item[1]),
+                    pending,
+                )
+                for item in mapped:
+                    write_item(item)
+
     metrics = aggregate(results)
+    metrics["selector_cache"] = {
+        "dir": str(args.selector_cache_dir) if args.selector_cache_dir else None,
+        "hits": sum(1 for row in results if row.get("selector_cache_hit")),
+        "total": len(results),
+    }
     metrics["remote_paddleocr"] = {
         "use_chart_recognition": args.use_chart_recognition,
         "use_doc_orientation_classify": args.use_doc_orientation_classify,
@@ -584,6 +683,8 @@ def evaluate(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
         "include_layout_blocks": args.include_layout_blocks,
         "max_completion_tokens": args.max_completion_tokens,
         "temperature": args.temperature,
+        "selector_cache_dir": str(args.selector_cache_dir) if args.selector_cache_dir else None,
+        "selector_concurrency": args.selector_concurrency,
         "retry_attempts": args.retry_attempts,
         "retry_base_sleep": args.retry_base_sleep,
         "sleep_between_records": args.sleep_between_records,
@@ -616,6 +717,8 @@ def add_eval_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     parser.add_argument("--images-root", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--artifacts-dir", required=True, type=Path)
+    parser.add_argument("--selector-cache-dir", type=Path)
+    parser.add_argument("--selector-concurrency", type=int, default=1)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--ernie-model")
     parser.add_argument("--max-completion-tokens", type=int, default=512)

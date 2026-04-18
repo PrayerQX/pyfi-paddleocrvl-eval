@@ -11,6 +11,7 @@ from remote_paddleocr_app.eval_pyfi import (
     collect_structured_intermediate,
     normalize_answer,
     occurrence_keys,
+    selector_cache_key,
 )
 from remote_paddleocr_app.pipeline import build_document_qa_prompt
 
@@ -138,6 +139,19 @@ def test_build_structured_choice_prompt_omits_task_metadata() -> None:
     assert "remote PaddleOCR-VL" in prompt
     assert "Capability:" not in prompt
     assert "Complexity:" not in prompt
+
+
+def test_selector_cache_key_ignores_credentials() -> None:
+    class Args:
+        ernie_model = "ernie-4.5"
+        max_completion_tokens = 256
+        temperature = None
+        disable_web_search = True
+
+    first = selector_cache_key(Args(), "prompt")
+    second = selector_cache_key(Args(), "prompt")
+    assert first == second
+    assert selector_cache_key(Args(), "different prompt") != first
 
 
 def test_occurrence_keys_preserve_duplicate_uids() -> None:

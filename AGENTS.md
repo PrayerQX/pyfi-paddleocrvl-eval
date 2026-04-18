@@ -148,6 +148,29 @@ C:\Users\小周\.local\bin\uv.exe run remote-paddleocr eval-pyfi `
   --progress-every 25
 ```
 
+如需减少重复远程 selector 调用，可以启用 selector 缓存和小规模并发：
+
+```powershell
+C:\Users\小周\.local\bin\uv.exe run remote-paddleocr eval-pyfi `
+  --dataset ..\data\pyfi\pyfi_eval_301.jsonl `
+  --images-root ..\data\pyfi `
+  --out output\eval_remote_exp3_structured_cached_ernie45_301.jsonl `
+  --artifacts-dir output\eval_remote_chart_ernie5_50_artifacts `
+  --selector-cache-dir output\selector_cache_exp3_structured_ernie45 `
+  --selector-concurrency 4 `
+  --use-chart-recognition `
+  --structured-intermediate `
+  --disable-web-search `
+  --ernie-model ernie-4.5-turbo-128k-preview `
+  --max-completion-tokens 256 `
+  --retry-attempts 5 `
+  --retry-base-sleep 8 `
+  --resume `
+  --progress-every 25
+```
+
+缓存和并发只允许用于工程加速，不得改变 prompt、证据、选项处理或评分逻辑。首次运行仍受远程服务限流影响；缓存命中后的复跑才会明显加速。
+
 ## 数据和产物策略
 
 不要提交：
