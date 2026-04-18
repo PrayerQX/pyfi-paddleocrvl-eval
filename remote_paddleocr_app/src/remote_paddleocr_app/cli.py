@@ -8,6 +8,7 @@ from .ernie_client import ErnieClient
 from .eval_pyfi import add_eval_parser, evaluate
 from .paddleocr_client import LayoutOptions
 from .pipeline import answer_from_document, parse_document
+from .stack_results import add_stack_parser, stack_results
 
 
 def main() -> None:
@@ -38,6 +39,7 @@ def main() -> None:
     chat_parser.add_argument("--include-reasoning", action="store_true")
 
     add_eval_parser(subparsers)
+    add_stack_parser(subparsers)
 
     args = parser.parse_args()
     settings = load_settings(args.env_file)
@@ -91,6 +93,10 @@ def main() -> None:
 
     if args.command == "eval-pyfi":
         evaluate(args, settings)
+        return
+
+    if args.command == "stack-results":
+        stack_results(args)
         return
 
 
