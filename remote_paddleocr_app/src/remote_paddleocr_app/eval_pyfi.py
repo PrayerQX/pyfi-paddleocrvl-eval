@@ -117,7 +117,6 @@ def read_or_parse(
 
 def build_choice_prompt(record: PyFiRecord, markdown: str) -> str:
     background = str(record.context.get("image_background") or "").strip()
-    guidance = capability_guidance(record)
     return "\n".join(
         [
             "You answer multiple-choice questions about financial charts/documents.",
@@ -127,12 +126,6 @@ def build_choice_prompt(record: PyFiRecord, markdown: str) -> str:
             "Choose exactly one valid option.",
             'Return exactly JSON such as {"answer":"A"}.',
             "Do not return explanations, markdown, or extra text.",
-            "",
-            "Task-specific guidance:",
-            guidance,
-            "",
-            f"Capability: {record.capability}",
-            f"Complexity: {record.complexity}",
             "",
             "Question:",
             record.question,
@@ -147,57 +140,6 @@ def build_choice_prompt(record: PyFiRecord, markdown: str) -> str:
             trim(markdown, 10000),
         ]
     )
-
-
-def capability_guidance(record: PyFiRecord) -> str:
-    capability = record.capability or ""
-    question = record.question.lower()
-    visual_terms = (
-        "color",
-        "line",
-        "dashed",
-        "solid",
-        "legend",
-        "represented",
-        "which country",
-        "which sector",
-        "which curve",
-        "which bar",
-    )
-    if capability == "Perception" or any(term in question for term in visual_terms):
-        return (
-            "This is a visual perception question. Prefer explicit color, legend, line style, "
-            "position, and label clues from the image background and options. Chart-recognition "
-            "tables may omit colors and line styles; do not let a noisy table override visual "
-            "clues from the question/background."
-        )
-    if capability == "Pattern_recognition":
-        return (
-            "This is a pattern-recognition question. Compare trends, relative slopes, peaks, "
-            "turning points, and ordering across options. Use numeric/table evidence when present, "
-            "but check that it matches the described visual pattern."
-        )
-    if capability == "Calculation_analysis":
-        return (
-            "This is a calculation question. Identify the relevant numbers first, compute the "
-            "requested difference/ratio/percentage, then choose the closest option."
-        )
-    if capability == "Data_extraction":
-        return (
-            "This is a data extraction question. Locate the exact label, year, axis, row, or "
-            "column mentioned in the question before choosing."
-        )
-    if capability == "Decision_support":
-        return (
-            "This is a decision-support question. Compare all constraints in the question against "
-            "each option and choose the option satisfying the most explicit evidence."
-        )
-    if capability == "Logical_reasoning":
-        return (
-            "This is a logical reasoning question. Combine the OCR evidence with the context, and "
-            "avoid selecting an option unless each condition in the question is satisfied."
-        )
-    return "Use the strongest explicit evidence from the OCR Markdown and image background."
 
 
 def trim(text: str, limit: int) -> str:
