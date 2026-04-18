@@ -292,25 +292,12 @@ def evaluate(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
                         web_search=not args.disable_web_search,
                         max_completion_tokens=args.max_completion_tokens,
                         stream=True,
-                        include_reasoning=args.include_reasoning_fallback,
+                        include_reasoning=False,
                     ),
                     attempts=args.retry_attempts,
                     base_sleep=args.retry_base_sleep,
                 )
                 prediction = normalize_answer(raw_answer, record.valid_options)
-                if prediction is None and not args.include_reasoning_fallback:
-                    raw_answer = with_retries(
-                        lambda: ernie.complete(
-                            prompt,
-                            web_search=not args.disable_web_search,
-                            max_completion_tokens=args.max_completion_tokens,
-                            stream=True,
-                            include_reasoning=True,
-                        ),
-                        attempts=args.retry_attempts,
-                        base_sleep=args.retry_base_sleep,
-                    )
-                    prediction = normalize_answer(raw_answer, record.valid_options)
             except Exception as exc:  # pragma: no cover - integration path
                 error = f"{type(exc).__name__}: {exc}"
 
@@ -349,7 +336,6 @@ def evaluate(args: argparse.Namespace, settings: Settings) -> dict[str, Any]:
         "retry_attempts": args.retry_attempts,
         "retry_base_sleep": args.retry_base_sleep,
         "sleep_between_records": args.sleep_between_records,
-        "include_reasoning_fallback": args.include_reasoning_fallback,
         "resume": args.resume,
     }
     metrics_path = args.out.with_suffix(args.out.suffix + ".metrics.json")
@@ -382,7 +368,6 @@ def add_eval_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     parser.add_argument("--limit", type=int)
     parser.add_argument("--ernie-model")
     parser.add_argument("--max-completion-tokens", type=int, default=512)
-    parser.add_argument("--include-reasoning-fallback", action="store_true")
     parser.add_argument("--retry-attempts", type=int, default=3)
     parser.add_argument("--retry-base-sleep", type=float, default=3.0)
     parser.add_argument("--sleep-between-records", type=float, default=0.0)
