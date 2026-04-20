@@ -1,0 +1,22 @@
+{
+  "dataset": {
+    "sample_jsonl": "data/pyfi/pyfi_eval_301.jsonl",
+    "images_root": "data/pyfi"
+  },
+  "model": {
+    "adapter": "remote-paddleocr-vl-ernie-docqa",
+    "selector_model": "ernie-4.5-turbo-128k-preview",
+    "selector_base_url": "https://aistudio.baidu.com/llm/lmapi/v3",
+    "selector_api_env": "FINVL_SELECTOR_API_KEY",
+    "paddleocr_vl_api_env": ["PADDLEOCR_VL_API_URL", "PADDLEOCR_VL_API_TOKEN"],
+    "vl_artifacts_dir": "runs/pyfi_eval_301_pure_remote_paddleocrvl_ernie45_table_artifacts"
+  },
+  "run": {
+    "full_out": "runs/pyfi_eval_301_pure_remote_paddleocrvl_ernie45_table.jsonl"
+  },
+  "notes": [
+    "Pure remote PaddleOCR-VL markdown plus ERNIE 4.5 only.",
+    "This is the manual table override for clearly calculation-heavy questions.",
+    "No local OCR evidence is used anywhere in this adapter."
+  ]
+}

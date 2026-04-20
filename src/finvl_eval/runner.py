@@ -29,10 +29,31 @@ def run(args: argparse.Namespace) -> dict:
 
     results: list[dict] = []
     processed = 0
-    with output_path.open("w", encoding="utf-8") as f:
+    existing_uids: set[str] = set()
+    if output_path.exists():
+        with output_path.open("r", encoding="utf-8") as existing:
+            for line in existing:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    # Ignore a truncated tail line left behind by an interrupted run.
+                    continue
+                results.append(item)
+                uid = item.get("uid")
+                if isinstance(uid, str):
+                    existing_uids.add(uid)
+        processed = len(results)
+
+    mode = "a" if existing_uids else "w"
+    with output_path.open(mode, encoding="utf-8") as f:
         for record in records_iter:
             if args.limit is not None and processed >= args.limit:
                 break
+            if record.uid in existing_uids:
+                continue
             image_path = record.resolved_image_path(args.images_root)
             if args.require_image and not image_path.exists():
                 continue
@@ -57,6 +78,9 @@ def run(args: argparse.Namespace) -> dict:
                 "correct": prediction == record.answer if record.answer else False,
                 "error": error,
             }
+            routed_prompt_label = getattr(adapter, "last_remote_prompt_label", None)
+            if isinstance(routed_prompt_label, str) and routed_prompt_label:
+                item["remote_prompt_label"] = routed_prompt_label
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
             f.flush()
             results.append(item)
@@ -90,8 +114,11 @@ def main() -> None:
             "openai-compatible-vlm",
             "paddleocr-text-docqa",
             "paddleocr-vl-docqa",
+            "remote-paddleocr-vl-ernie-docqa",
             "paddleocr-vl-hybrid-docqa",
             "paddleocr-vl-grounded-docqa",
+            "remote-paddleocr-vl-grounded-docqa",
+            "remote-paddleocr-vl-table-spotting-router-docqa",
             "paddleocr-vl-boosted-docqa",
         ],
         default="first-option",
@@ -119,6 +146,26 @@ def main() -> None:
     parser.add_argument("--paddle-vl-backend", help="PaddleOCR VL recognition backend")
     parser.add_argument("--paddle-vl-server-url", help="PaddleOCR VL recognition server URL")
     parser.add_argument("--paddle-vl-model-dir", help="Local PaddleOCR-VL recognition model dir")
+    parser.add_argument("--paddle-vl-api-url", help="Remote PaddleOCR-VL layout-parsing API URL")
+    parser.add_argument(
+        "--paddle-vl-prompt-label",
+        choices=["chart", "seal", "spotting", "table", "formula", "ocr"],
+        help="Remote PaddleOCR-VL promptLabel to use with the official parsing payload.",
+    )
+    local_ocr_group = parser.add_mutually_exclusive_group()
+    local_ocr_group.add_argument(
+        "--use-local-ocr-evidence",
+        dest="use_local_ocr_evidence",
+        action="store_true",
+        default=None,
+        help="Keep traditional local OCR as an extra evidence channel.",
+    )
+    local_ocr_group.add_argument(
+        "--no-local-ocr-evidence",
+        dest="use_local_ocr_evidence",
+        action="store_false",
+        help="Disable traditional local OCR and rely on PaddleOCR-VL markdown only.",
+    )
     parser.add_argument("--num-passes", type=int, default=3, help="Number of passes for self-consistency voting")
     args = parser.parse_args()
     run(args)

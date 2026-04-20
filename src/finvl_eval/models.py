@@ -7,10 +7,40 @@ import random
 import re
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
-from .evidence import build_grounded_evidence
+from .evidence import build_grounded_evidence, build_remote_markdown_grounded_evidence
 from .records import EvalRecord
 from .scoring import normalize_answer
+
+REMOTE_PADDLEOCR_VL_DEFAULTS: dict[str, Any] = {
+    "markdownIgnoreLabels": [
+        "header",
+        "header_image",
+        "footer",
+        "footer_image",
+        "number",
+        "footnote",
+        "aside_text",
+    ],
+    "useDocOrientationClassify": False,
+    "useDocUnwarping": False,
+    "useLayoutDetection": False,
+    "useChartRecognition": True,
+    "useSealRecognition": True,
+    "useOcrForImageBlock": True,
+    "mergeTables": True,
+    "relevelTitles": True,
+    "layoutShapeMode": "auto",
+    "promptLabel": "spotting",
+    "repetitionPenalty": 1,
+    "temperature": 0,
+    "topP": 1,
+    "minPixels": 147384,
+    "maxPixels": 2822400,
+    "layoutNms": True,
+    "restructurePages": True,
+}
 
 
 class ModelAdapter(Protocol):
@@ -213,6 +243,11 @@ class PaddleOCRVLDocQAAdapter:
         vl_rec_model_dir: str | None = None,
         artifacts_dir: str | Path | None = None,
         use_chart_recognition: bool = True,
+        api_url: str | None = None,
+        api_token: str | None = None,
+        use_doc_orientation_classify: bool = False,
+        use_doc_unwarping: bool = False,
+        remote_prompt_label: str | None = None,
         selector_stream: bool | None = None,
         selector_extra_body: dict[str, Any] | None = None,
         selector_max_tokens: int | None = None,
@@ -232,8 +267,17 @@ class PaddleOCRVLDocQAAdapter:
         self.vl_rec_backend = vl_rec_backend or os.getenv("PADDLEOCR_VL_BACKEND")
         self.vl_rec_server_url = vl_rec_server_url or os.getenv("PADDLEOCR_VL_SERVER_URL")
         self.vl_rec_model_dir = vl_rec_model_dir or os.getenv("PADDLEOCR_VL_MODEL_DIR")
+        self.api_url = (api_url or os.getenv("PADDLEOCR_VL_API_URL") or "").strip()
+        self.api_token = (api_token or os.getenv("PADDLEOCR_VL_API_TOKEN") or "").strip()
+        self.use_doc_orientation_classify = use_doc_orientation_classify
+        self.use_doc_unwarping = use_doc_unwarping
         self.artifacts_dir = Path(artifacts_dir) if artifacts_dir else None
         self.use_chart_recognition = use_chart_recognition
+        self.remote_prompt_label = (
+            remote_prompt_label
+            or os.getenv("PADDLEOCR_VL_PROMPT_LABEL")
+            or str(REMOTE_PADDLEOCR_VL_DEFAULTS["promptLabel"])
+        ).strip()
         self._pipeline = None
 
     def predict(self, record: EvalRecord, image_path: Path, prompt: str) -> str | None:
@@ -247,6 +291,12 @@ class PaddleOCRVLDocQAAdapter:
             markdown_path = self.artifacts_dir / f"{_safe_uid(uid)}.md"
             if markdown_path.exists():
                 return markdown_path.read_text(encoding="utf-8")
+
+        if self.api_url:
+            parsed_text, raw_result = self._parse_image_remote(image_path)
+            if self.artifacts_dir:
+                self._write_remote_artifacts(uid, parsed_text, raw_result)
+            return parsed_text
 
         if self._pipeline is None:
             from paddleocr import PaddleOCRVL
@@ -292,6 +342,102 @@ class PaddleOCRVLDocQAAdapter:
                 encoding="utf-8",
             )
         return parsed_text
+
+    def _parse_image_remote(self, image_path: Path) -> tuple[str, dict[str, Any]]:
+        if not self.api_url:
+            raise RuntimeError("PADDLEOCR_VL_API_URL is required for remote PaddleOCR-VL parsing.")
+        if not self.api_token:
+            raise RuntimeError("PADDLEOCR_VL_API_TOKEN is required for remote PaddleOCR-VL parsing.")
+
+        import requests
+
+        file_bytes = image_path.read_bytes()
+        payload = {
+            "file": base64.b64encode(file_bytes).decode("ascii"),
+            "fileType": _paddleocr_file_type(image_path),
+            **REMOTE_PADDLEOCR_VL_DEFAULTS,
+        }
+        payload["promptLabel"] = self.remote_prompt_label
+        payload["useDocOrientationClassify"] = self.use_doc_orientation_classify
+        payload["useDocUnwarping"] = self.use_doc_unwarping
+        payload["useChartRecognition"] = self.use_chart_recognition
+        response = requests.post(
+            self.api_url,
+            json=payload,
+            headers={
+                "Authorization": f"token {self.api_token}",
+                "Content-Type": "application/json",
+            },
+            timeout=300,
+        )
+        response.raise_for_status()
+        body = response.json()
+        result = body.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("Remote PaddleOCR-VL response is missing a result object.")
+
+        layout_results = result.get("layoutParsingResults")
+        if not isinstance(layout_results, list):
+            raise RuntimeError("Remote PaddleOCR-VL response is missing layoutParsingResults.")
+
+        markdown_parts: list[str] = []
+        for item in layout_results:
+            if not isinstance(item, dict):
+                continue
+            markdown = item.get("markdown")
+            if isinstance(markdown, dict):
+                text = markdown.get("text")
+                if text:
+                    markdown_parts.append(str(text))
+
+        parsed_text = "\n\n".join(part for part in markdown_parts if part).strip()
+        return parsed_text, result
+
+    def _write_remote_artifacts(self, uid: str, parsed_text: str, raw_result: dict[str, Any]) -> None:
+        if not self.artifacts_dir:
+            return
+
+        import requests
+
+        safe_uid = _safe_uid(uid)
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        (self.artifacts_dir / f"{safe_uid}.md").write_text(parsed_text, encoding="utf-8")
+        (self.artifacts_dir / f"{safe_uid}.json").write_text(
+            json.dumps(raw_result, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        assets_dir = self.artifacts_dir / f"{safe_uid}_assets"
+        layout_results = raw_result.get("layoutParsingResults")
+        if not isinstance(layout_results, list):
+            return
+
+        for index, item in enumerate(layout_results):
+            if not isinstance(item, dict):
+                continue
+
+            markdown = item.get("markdown")
+            if isinstance(markdown, dict):
+                images = markdown.get("images")
+                if isinstance(images, dict):
+                    for img_path, img_url in images.items():
+                        if isinstance(img_path, str) and isinstance(img_url, str):
+                            self._download_remote_asset(requests, img_url, assets_dir / img_path)
+
+            output_images = item.get("outputImages")
+            if isinstance(output_images, dict):
+                for image_name, image_url in output_images.items():
+                    if not isinstance(image_name, str) or not isinstance(image_url, str):
+                        continue
+                    suffix = Path(_remote_asset_name(image_url)).suffix or ".jpg"
+                    filename = assets_dir / f"{image_name}_{index}{suffix}"
+                    self._download_remote_asset(requests, image_url, filename)
+
+    def _download_remote_asset(self, requests_module: Any, image_url: str, target_path: Path) -> None:
+        response = requests_module.get(image_url, timeout=120)
+        response.raise_for_status()
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(response.content)
 
     def _select_with_openai(self, record: EvalRecord, parsed_markdown: str) -> str | None:
         if not self.selector_api_key:
@@ -359,6 +505,12 @@ class PaddleOCRVLHybridDocQAAdapter(PaddleOCRVLDocQAAdapter):
         artifacts_dir: str | Path | None = None,
         ocr_artifacts_dir: str | Path | None = None,
         use_chart_recognition: bool = True,
+        api_url: str | None = None,
+        api_token: str | None = None,
+        use_doc_orientation_classify: bool = False,
+        use_doc_unwarping: bool = False,
+        remote_prompt_label: str | None = None,
+        use_local_ocr_evidence: bool | None = None,
         selector_stream: bool | None = None,
         selector_extra_body: dict[str, Any] | None = None,
         selector_max_tokens: int | None = None,
@@ -373,22 +525,35 @@ class PaddleOCRVLHybridDocQAAdapter(PaddleOCRVLDocQAAdapter):
             vl_rec_model_dir=vl_rec_model_dir,
             artifacts_dir=artifacts_dir,
             use_chart_recognition=use_chart_recognition,
+            api_url=api_url,
+            api_token=api_token,
+            use_doc_orientation_classify=use_doc_orientation_classify,
+            use_doc_unwarping=use_doc_unwarping,
+            remote_prompt_label=remote_prompt_label,
             selector_stream=selector_stream,
             selector_extra_body=selector_extra_body,
             selector_max_tokens=selector_max_tokens,
             selector_use_max_completion_tokens=selector_use_max_completion_tokens,
         )
-        self._ocr_adapter = PaddleOCRTextDocQAAdapter(
-            selector_model=None,
-            artifacts_dir=ocr_artifacts_dir,
+        if use_local_ocr_evidence is None:
+            use_local_ocr_evidence = not bool(self.api_url)
+        self.use_local_ocr_evidence = use_local_ocr_evidence
+        self._ocr_adapter = (
+            PaddleOCRTextDocQAAdapter(
+                selector_model=None,
+                artifacts_dir=ocr_artifacts_dir,
+            )
+            if self.use_local_ocr_evidence
+            else None
         )
 
     def predict(self, record: EvalRecord, image_path: Path, prompt: str) -> str | None:
         parsed_markdown = self.parse_image(image_path, record.uid)
-        ocr_text = self._ocr_adapter.parse_image(image_path, record.uid)
+        ocr_text = self._ocr_adapter.parse_image(image_path, record.uid) if self._ocr_adapter else ""
         if self.selector_model:
             return self._select_with_openai(record, parsed_markdown, ocr_text)
-        return self._select_with_lexical_heuristic(record, "\n\n".join([parsed_markdown, ocr_text]))
+        combined = "\n\n".join(part for part in [parsed_markdown, ocr_text] if part)
+        return self._select_with_lexical_heuristic(record, combined)
 
     def _select_with_openai(
         self,
@@ -405,13 +570,10 @@ class PaddleOCRVLHybridDocQAAdapter(PaddleOCRVLDocQAAdapter):
             base_url=(self.selector_base_url or "https://api.openai.com/v1"),
             timeout=120,
         )
-        selector_prompt = _build_selector_prompt(
-            record,
-            {
-                "PaddleOCR-VL parsed markdown": parsed_markdown,
-                "Traditional OCR text": ocr_text,
-            },
-        )
+        evidence = {"PaddleOCR-VL parsed markdown": parsed_markdown}
+        if ocr_text:
+            evidence["Traditional OCR text"] = ocr_text
+        selector_prompt = _build_selector_prompt(record, evidence)
         raw = _chat_completion_text(
             client,
             model=self.selector_model,
@@ -423,6 +585,50 @@ class PaddleOCRVLHybridDocQAAdapter(PaddleOCRVLDocQAAdapter):
             use_max_completion_tokens=self.selector_use_max_completion_tokens,
         )
         return _valid_or_fallback(record, raw, "\n\n".join([parsed_markdown, ocr_text]))
+
+
+class RemotePaddleOCRVLErnieAdapter(PaddleOCRVLDocQAAdapter):
+    """
+    Pure remote PaddleOCR-VL markdown + selector.
+
+    This adapter never invokes local OCR. All evidence comes from the remote
+    PaddleOCR-VL layout-parsing API plus record metadata.
+    """
+
+    name = "remote-paddleocr-vl-ernie-docqa"
+
+    def predict(self, record: EvalRecord, image_path: Path, prompt: str) -> str | None:
+        self.last_remote_prompt_label = self.remote_prompt_label
+        parsed_markdown = self.parse_image(image_path, record.uid)
+        if self.selector_model:
+            return self._select_with_openai(record, parsed_markdown)
+        return self._select_with_lexical_heuristic(record, parsed_markdown)
+
+    def _select_with_openai(self, record: EvalRecord, parsed_markdown: str) -> str | None:
+        if not self.selector_api_key:
+            raise RuntimeError("FINVL_SELECTOR_API_KEY or OPENAI_API_KEY is required when FINVL_SELECTOR_MODEL is set.")
+        from openai import OpenAI
+
+        client = OpenAI(
+            api_key=self.selector_api_key,
+            base_url=(self.selector_base_url or "https://api.openai.com/v1"),
+            timeout=120,
+        )
+        selector_prompt = _build_remote_markdown_selector_prompt(
+            record,
+            {"PaddleOCR-VL parsed markdown": parsed_markdown},
+        )
+        raw = _chat_completion_text(
+            client,
+            model=self.selector_model,
+            prompt=selector_prompt,
+            temperature=0.1,
+            max_tokens=self.selector_max_tokens,
+            stream=self.selector_stream,
+            extra_body=self.selector_extra_body,
+            use_max_completion_tokens=self.selector_use_max_completion_tokens,
+        )
+        return _valid_or_fallback(record, raw, parsed_markdown)
 
 
 class PaddleOCRVLBoostedDocQAAdapter(PaddleOCRVLHybridDocQAAdapter):
@@ -462,10 +668,9 @@ class PaddleOCRVLBoostedDocQAAdapter(PaddleOCRVLHybridDocQAAdapter):
             timeout=120,
         )
 
-        evidence = {
-            "PaddleOCR-VL parsed markdown": parsed_markdown,
-            "Traditional OCR text": ocr_text,
-        }
+        evidence = {"PaddleOCR-VL parsed markdown": parsed_markdown}
+        if ocr_text:
+            evidence["Traditional OCR text"] = ocr_text
         selector_prompt = _build_boosted_selector_prompt(record, evidence)
 
         # Self-consistency: run multiple passes, majority vote
@@ -488,7 +693,7 @@ class PaddleOCRVLBoostedDocQAAdapter(PaddleOCRVLHybridDocQAAdapter):
                 last_valid_raw = raw
 
         if not votes:
-            return _valid_or_fallback(record, last_valid_raw, "\n\n".join([parsed_markdown, ocr_text]))
+            return _valid_or_fallback(record, last_valid_raw, "\n\n".join(part for part in [parsed_markdown, ocr_text] if part))
 
         best = max(votes, key=votes.get)
         total_votes = sum(votes.values())
@@ -521,10 +726,10 @@ class PaddleOCRVLBoostedDocQAAdapter(PaddleOCRVLHybridDocQAAdapter):
                 return json.dumps({"answer": alt, "votes": votes, "reroute": "split_d"}, ensure_ascii=False)
 
         # 2. Unanimous D: verify with hybrid prompt
-        hybrid_prompt = _build_selector_prompt(
-            record,
-            {"PaddleOCR-VL parsed markdown": parsed_markdown, "Traditional OCR text": ocr_text},
-        )
+        evidence = {"PaddleOCR-VL parsed markdown": parsed_markdown}
+        if ocr_text:
+            evidence["Traditional OCR text"] = ocr_text
+        hybrid_prompt = _build_selector_prompt(record, evidence)
         hybrid_raw = _chat_completion_text(
             client,
             model=self.selector_model,
@@ -540,7 +745,7 @@ class PaddleOCRVLBoostedDocQAAdapter(PaddleOCRVLHybridDocQAAdapter):
             return json.dumps({"answer": hybrid_answer, "votes": votes, "reroute": "hybrid_d_avoid"}, ensure_ascii=False)
 
         # 3. Both say D: check evidence for better option
-        combined = "\n".join([parsed_markdown, ocr_text]).lower()
+        combined = "\n".join(part for part in [parsed_markdown, ocr_text] if part).lower()
         best_letter: str | None = None
         best_score = 0
         for letter, opt_text in record.options.items():
@@ -598,6 +803,65 @@ class PaddleOCRVLGroundedDocQAAdapter(PaddleOCRVLHybridDocQAAdapter):
         return _valid_or_fallback(record, raw, evidence.text)
 
 
+class RemotePaddleOCRVLGroundedDocQAAdapter(RemotePaddleOCRVLErnieAdapter):
+    """
+    Pure remote PaddleOCR-VL grounded QA chain.
+
+    This compresses remote PaddleOCR-VL markdown into a structured evidence
+    packet before sending it to the selector, while still avoiding any local
+    OCR dependency.
+    """
+
+    name = "remote-paddleocr-vl-grounded-docqa"
+
+    def _select_with_openai(self, record: EvalRecord, parsed_markdown: str) -> str | None:
+        if not self.selector_api_key:
+            raise RuntimeError("FINVL_SELECTOR_API_KEY or OPENAI_API_KEY is required when FINVL_SELECTOR_MODEL is set.")
+        from openai import OpenAI
+
+        client = OpenAI(
+            api_key=self.selector_api_key,
+            base_url=(self.selector_base_url or "https://api.openai.com/v1"),
+            timeout=120,
+        )
+        evidence = build_remote_markdown_grounded_evidence(record, parsed_markdown)
+        selector_prompt = _build_remote_markdown_grounded_selector_prompt(record, evidence.text, parsed_markdown)
+        raw = _chat_completion_text(
+            client,
+            model=self.selector_model,
+            prompt=selector_prompt,
+            temperature=0.0,
+            max_tokens=max(self.selector_max_tokens, 512),
+            stream=self.selector_stream,
+            extra_body=self.selector_extra_body,
+            use_max_completion_tokens=self.selector_use_max_completion_tokens,
+        )
+        return _valid_or_fallback(record, raw, evidence.text)
+
+
+class RemotePaddleOCRVLTableSpottingRouterAdapter(RemotePaddleOCRVLErnieAdapter):
+    """
+    Pure remote PaddleOCR-VL router between table and spotting modes.
+
+    The routing decision is based only on the question and answer options.
+    """
+
+    name = "remote-paddleocr-vl-table-spotting-router-docqa"
+
+    def predict(self, record: EvalRecord, image_path: Path, prompt: str) -> str | None:
+        chosen_label = route_table_spotting_prompt_label(record)
+        self.last_remote_prompt_label = chosen_label
+        previous_label = self.remote_prompt_label
+        self.remote_prompt_label = chosen_label
+        try:
+            parsed_markdown = self.parse_image(image_path, f"{record.uid}__{chosen_label}")
+        finally:
+            self.remote_prompt_label = previous_label
+        if self.selector_model:
+            return self._select_with_openai(record, parsed_markdown)
+        return self._select_with_lexical_heuristic(record, parsed_markdown)
+
+
 def build_adapter(args: Any) -> ModelAdapter:
     if args.model == "first-option":
         return FirstOptionAdapter()
@@ -623,6 +887,23 @@ def build_adapter(args: Any) -> ModelAdapter:
             vl_rec_backend=args.paddle_vl_backend,
             vl_rec_server_url=args.paddle_vl_server_url,
             vl_rec_model_dir=args.paddle_vl_model_dir,
+            api_url=getattr(args, "paddle_vl_api_url", None),
+            remote_prompt_label=getattr(args, "paddle_vl_prompt_label", None),
+            selector_stream=getattr(args, "selector_stream", None),
+            selector_extra_body=_parse_extra_body_arg(getattr(args, "selector_extra_body_json", None)),
+            selector_max_tokens=getattr(args, "selector_max_tokens", None),
+            selector_use_max_completion_tokens=getattr(args, "selector_use_max_completion_tokens", None),
+        )
+    if args.model == "remote-paddleocr-vl-ernie-docqa":
+        return RemotePaddleOCRVLErnieAdapter(
+            selector_model=args.selector_model,
+            selector_base_url=getattr(args, "selector_base_url", None),
+            artifacts_dir=args.artifacts_dir,
+            vl_rec_backend=args.paddle_vl_backend,
+            vl_rec_server_url=args.paddle_vl_server_url,
+            vl_rec_model_dir=args.paddle_vl_model_dir,
+            api_url=getattr(args, "paddle_vl_api_url", None),
+            remote_prompt_label=getattr(args, "paddle_vl_prompt_label", None),
             selector_stream=getattr(args, "selector_stream", None),
             selector_extra_body=_parse_extra_body_arg(getattr(args, "selector_extra_body_json", None)),
             selector_max_tokens=getattr(args, "selector_max_tokens", None),
@@ -637,6 +918,9 @@ def build_adapter(args: Any) -> ModelAdapter:
             vl_rec_backend=args.paddle_vl_backend,
             vl_rec_server_url=args.paddle_vl_server_url,
             vl_rec_model_dir=args.paddle_vl_model_dir,
+            api_url=getattr(args, "paddle_vl_api_url", None),
+            remote_prompt_label=getattr(args, "paddle_vl_prompt_label", None),
+            use_local_ocr_evidence=getattr(args, "use_local_ocr_evidence", None),
             selector_stream=getattr(args, "selector_stream", None),
             selector_extra_body=_parse_extra_body_arg(getattr(args, "selector_extra_body_json", None)),
             selector_max_tokens=getattr(args, "selector_max_tokens", None),
@@ -651,6 +935,9 @@ def build_adapter(args: Any) -> ModelAdapter:
             vl_rec_backend=args.paddle_vl_backend,
             vl_rec_server_url=args.paddle_vl_server_url,
             vl_rec_model_dir=args.paddle_vl_model_dir,
+            api_url=getattr(args, "paddle_vl_api_url", None),
+            remote_prompt_label=getattr(args, "paddle_vl_prompt_label", None),
+            use_local_ocr_evidence=getattr(args, "use_local_ocr_evidence", None),
             selector_stream=getattr(args, "selector_stream", None),
             selector_extra_body=_parse_extra_body_arg(getattr(args, "selector_extra_body_json", None)),
             selector_max_tokens=getattr(args, "selector_max_tokens", None),
@@ -666,6 +953,39 @@ def build_adapter(args: Any) -> ModelAdapter:
             vl_rec_backend=args.paddle_vl_backend,
             vl_rec_server_url=args.paddle_vl_server_url,
             vl_rec_model_dir=args.paddle_vl_model_dir,
+            api_url=getattr(args, "paddle_vl_api_url", None),
+            remote_prompt_label=getattr(args, "paddle_vl_prompt_label", None),
+            use_local_ocr_evidence=getattr(args, "use_local_ocr_evidence", None),
+            selector_stream=getattr(args, "selector_stream", None),
+            selector_extra_body=_parse_extra_body_arg(getattr(args, "selector_extra_body_json", None)),
+            selector_max_tokens=getattr(args, "selector_max_tokens", None),
+            selector_use_max_completion_tokens=getattr(args, "selector_use_max_completion_tokens", None),
+        )
+    if args.model == "remote-paddleocr-vl-grounded-docqa":
+        return RemotePaddleOCRVLGroundedDocQAAdapter(
+            selector_model=args.selector_model,
+            selector_base_url=getattr(args, "selector_base_url", None),
+            artifacts_dir=args.artifacts_dir,
+            vl_rec_backend=args.paddle_vl_backend,
+            vl_rec_server_url=args.paddle_vl_server_url,
+            vl_rec_model_dir=args.paddle_vl_model_dir,
+            api_url=getattr(args, "paddle_vl_api_url", None),
+            remote_prompt_label=getattr(args, "paddle_vl_prompt_label", None),
+            selector_stream=getattr(args, "selector_stream", None),
+            selector_extra_body=_parse_extra_body_arg(getattr(args, "selector_extra_body_json", None)),
+            selector_max_tokens=getattr(args, "selector_max_tokens", None),
+            selector_use_max_completion_tokens=getattr(args, "selector_use_max_completion_tokens", None),
+        )
+    if args.model == "remote-paddleocr-vl-table-spotting-router-docqa":
+        return RemotePaddleOCRVLTableSpottingRouterAdapter(
+            selector_model=args.selector_model,
+            selector_base_url=getattr(args, "selector_base_url", None),
+            artifacts_dir=args.artifacts_dir,
+            vl_rec_backend=args.paddle_vl_backend,
+            vl_rec_server_url=args.paddle_vl_server_url,
+            vl_rec_model_dir=args.paddle_vl_model_dir,
+            api_url=getattr(args, "paddle_vl_api_url", None),
+            remote_prompt_label=getattr(args, "paddle_vl_prompt_label", None),
             selector_stream=getattr(args, "selector_stream", None),
             selector_extra_body=_parse_extra_body_arg(getattr(args, "selector_extra_body_json", None)),
             selector_max_tokens=getattr(args, "selector_max_tokens", None),
@@ -685,6 +1005,18 @@ def _mime_type(path: Path) -> str:
     return "application/octet-stream"
 
 
+def _paddleocr_file_type(path: Path) -> int:
+    if path.suffix.lower() == ".pdf":
+        return 0
+    return 1
+
+
+def _remote_asset_name(image_url: str) -> str:
+    parsed = urlparse(image_url)
+    name = Path(parsed.path).name
+    return name or "asset"
+
+
 def _safe_uid(uid: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", uid)[:180]
 
@@ -695,6 +1027,127 @@ def _selector_api_key() -> str | None:
 
 def _selector_base_url() -> str | None:
     return os.getenv("FINVL_SELECTOR_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+
+
+def route_table_spotting_prompt_label(record: EvalRecord) -> str:
+    question = record.question.lower()
+    option_texts = [str(value).strip() for value in record.options.values()]
+    options_blob = " ".join(option_texts).lower()
+    background = str(record.context.get("image_background") or "").lower()
+    combined = f"{question}\n{options_blob}\n{background}"
+
+    table_triggers = {
+        "percentage",
+        "percent",
+        "increase",
+        "decrease",
+        "difference",
+        "total",
+        "sum",
+        "average",
+        "ratio",
+        "spread",
+        "growth",
+        "growth rate",
+        "amount",
+        "value",
+        "how much",
+        "how many",
+        "approximately",
+        "approximate",
+        "decline",
+        "rise",
+        "drop",
+        "monthly",
+        "annual",
+        "year-over-year",
+        "yoy",
+        "from",
+        "to",
+    }
+    table_background_triggers = {
+        "table",
+        "right-hand scale",
+        "rhs",
+        "stacked bar",
+        "stacked area",
+        "bar chart",
+        "monthly loan size",
+        "approved property project permits",
+        "average interest-rate spread",
+        "debt maturity",
+    }
+    spotting_background_triggers = {
+        "diagram",
+        "process",
+        "flow",
+        "portfolio",
+        "reference portfolio",
+        "k-line",
+        "moving average",
+        "candlestick",
+        "technical analysis",
+        "consent management",
+    }
+
+    numeric_option_count = sum(1 for text in option_texts if _looks_numeric_option(text))
+    has_many_digits = len(re.findall(r"\d", combined)) >= 8
+    has_year_range = len(re.findall(r"\b(20\d{2}|19\d{2})\b", combined)) >= 2
+    has_quant_trigger = any(keyword in combined for keyword in table_triggers)
+    has_table_background = any(keyword in background for keyword in table_background_triggers)
+    has_spotting_background = any(keyword in background for keyword in spotting_background_triggers)
+    asks_for_category = any(
+        phrase in question
+        for phrase in [
+            "which color",
+            "which line",
+            "which bar",
+            "which curve",
+            "which segment",
+            "what trend",
+            "positive or negative",
+            "represented by",
+            "what is the next step",
+        ]
+    )
+
+    if has_spotting_background or asks_for_category:
+        return "spotting"
+    if has_quant_trigger and (numeric_option_count >= 2 or has_many_digits or has_year_range or has_table_background):
+        return "table"
+    if numeric_option_count >= max(3, len(option_texts) - 1) and (has_many_digits or has_year_range):
+        return "table"
+    return "spotting"
+
+
+def _looks_numeric_option(text: str) -> bool:
+    lowered = text.lower()
+    if re.search(r"\d", lowered):
+        return True
+    numeric_words = {
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "positive",
+        "negative",
+    }
+    return any(word in lowered for word in numeric_words) and len(lowered.split()) <= 4
+
+
+def _contains_color_word(text: str) -> bool:
+    return any(word in text for word in ["blue", "green", "red", "orange", "cyan", "yellow", "black", "white"])
+
+
+def _contains_direction_word(text: str) -> bool:
+    return any(word in text for word in ["increase", "decrease", "positive", "negative", "upward", "downward"])
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -832,6 +1285,43 @@ def _build_selector_prompt(record: EvalRecord, evidence: dict[str, str]) -> str:
     return "\n".join(sections)
 
 
+def _build_remote_markdown_selector_prompt(record: EvalRecord, evidence: dict[str, str]) -> str:
+    option_letters = ", ".join(record.options.keys())
+    sections = [
+        "You are answering a financial document multiple-choice question.",
+        "All visual information available to you comes from PaddleOCR-VL markdown generated by a remote document parser.",
+        "Do not assume any hidden OCR channel exists.",
+        "Prefer exact table cells, row labels, column labels, legends, and axis values over prose summaries.",
+        "For calculation questions, identify the exact entities and time periods first, then compute before mapping to an option.",
+        "You must choose exactly one valid option letter.",
+        'Never output null, unknown, or an explanation.',
+        'Return exactly this JSON shape, replacing A with one valid letter: {"answer":"A"}',
+        "",
+        f"Valid letters: {option_letters}",
+        f"Capability: {record.capability}",
+        f"Complexity: {record.complexity}",
+    ]
+    background = record.context.get("image_background")
+    if background:
+        sections.extend(["", "Image background:", _trim_text(str(background), 3000)])
+    analysis = record.context.get("analysis_information")
+    if analysis:
+        sections.extend(["", "Analysis information:", _trim_text(str(analysis), 3000)])
+    for title, text in evidence.items():
+        sections.extend(["", f"{title}:", _trim_text(text, 12000)])
+    sections.extend(
+        [
+            "",
+            "Question:",
+            record.question,
+            "",
+            "Options:",
+            json.dumps(record.options, ensure_ascii=False),
+        ]
+    )
+    return "\n".join(sections)
+
+
 def _build_grounded_selector_prompt(
     record: EvalRecord,
     evidence_packet: str,
@@ -868,6 +1358,42 @@ def _build_grounded_selector_prompt(
             "",
             "raw_paddle_ocr_text_appendix:",
             _trim_text(ocr_text, 5000),
+        ]
+    )
+
+
+def _build_remote_markdown_grounded_selector_prompt(
+    record: EvalRecord,
+    evidence_packet: str,
+    parsed_markdown: str,
+) -> str:
+    option_letters = ", ".join(record.options.keys())
+    return "\n".join(
+        [
+            "You are selecting an answer to a financial document multiple-choice question.",
+            "All visual information available to you comes from PaddleOCR-VL markdown produced by a remote parser.",
+            "The structured evidence packet is a retrieval aid, not an exhaustive or always-correct solver.",
+            "Use the raw PaddleOCR-VL markdown appendix whenever it contains details missing from the packet.",
+            "For calculation questions, verify that every numeric operation uses the exact entity and time period in the question.",
+            "Do not choose an exploratory calculation candidate only because it numerically matches an option.",
+            "You must choose one valid option. Never output null or unknown.",
+            (
+                "Return exactly JSON with this shape: "
+                '{"answer":"A","evidence":"short Paddle row evidence","source":"paddle_vl_table|paddle_vl_markdown|background","operation":"optional calculation"}'
+            ),
+            "",
+            f"Valid letters: {option_letters}",
+            "",
+            "Question:",
+            record.question,
+            "",
+            "Options:",
+            json.dumps(record.options, ensure_ascii=False),
+            "",
+            evidence_packet,
+            "",
+            "raw_paddle_vl_markdown_appendix:",
+            _trim_text(parsed_markdown, 9000),
         ]
     )
 

@@ -9,8 +9,10 @@
     "selector_model": "ernie-4.5-turbo-128k-preview",
     "selector_base_url": "https://aistudio.baidu.com/llm/lmapi/v3",
     "selector_api_env": "FINVL_SELECTOR_API_KEY",
+    "paddleocr_vl_api_env": ["PADDLEOCR_VL_API_URL", "PADDLEOCR_VL_API_TOKEN"],
     "vl_artifacts_dir": "runs/pyfi_paddleocrvl15_glm301_artifacts",
-    "ocr_artifacts_dir": "runs/pyfi_paddleocr_text_glm301_artifacts"
+    "ocr_artifacts_dir": "runs/pyfi_paddleocr_text_glm301_artifacts",
+    "use_local_ocr_evidence": false
   },
   "run": {
     "smoke_out": "runs/pyfi_paddleocrvl15_hybrid_ernie45_10.jsonl",
@@ -19,7 +21,8 @@
   },
   "notes": [
     "Do not commit API keys. Set FINVL_SELECTOR_API_KEY in the shell before running.",
-    "This adapter reuses existing PaddleOCR-VL markdown and traditional PaddleOCR text artifacts when present.",
+    "Set PADDLEOCR_VL_API_URL and PADDLEOCR_VL_API_TOKEN to use the remote layout-parsing API.",
+    "When the remote PaddleOCR-VL API is enabled, the hybrid adapter defaults to PaddleOCR-VL markdown only and skips local OCR evidence.",
     "ernie-5.0-thinking-preview is supported, but local testing showed very high latency for batch evaluation."
   ]
 }

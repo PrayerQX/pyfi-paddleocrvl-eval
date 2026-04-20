@@ -1,0 +1,23 @@
+{
+  "dataset": {
+    "sample_jsonl": "data/pyfi/pyfi_eval_301.jsonl",
+    "images_root": "data/pyfi"
+  },
+  "model": {
+    "adapter": "remote-paddleocr-vl-grounded-docqa",
+    "selector_model": "ernie-4.5-turbo-128k-preview",
+    "selector_base_url": "https://aistudio.baidu.com/llm/lmapi/v3",
+    "selector_api_env": "FINVL_SELECTOR_API_KEY",
+    "paddleocr_vl_api_env": ["PADDLEOCR_VL_API_URL", "PADDLEOCR_VL_API_TOKEN"],
+    "vl_artifacts_dir": "runs/pyfi_eval_301_pure_remote_paddleocrvl_ernie45_artifacts"
+  },
+  "run": {
+    "full_out": "runs/pyfi_eval_301_pure_remote_paddleocrvl_ernie45_grounded.jsonl"
+  },
+  "notes": [
+    "This is the pure remote grounded pipeline: remote PaddleOCR-VL markdown is condensed into a structured evidence packet before ERNIE 4.5 sees it.",
+    "The default remote promptLabel is spotting.",
+    "No local OCR evidence is used anywhere in this adapter.",
+    "Do not commit API keys. Set FINVL_SELECTOR_API_KEY, PADDLEOCR_VL_API_URL, and PADDLEOCR_VL_API_TOKEN in the shell before running."
+  ]
+}

@@ -241,6 +241,8 @@ python -m finvl_eval.runner `
 ```powershell
 $env:FINVL_SELECTOR_API_KEY="your-aistudio-token"
 $env:FINVL_SELECTOR_BASE_URL="https://aistudio.baidu.com/llm/lmapi/v3"
+$env:PADDLEOCR_VL_API_URL="https://your-remote-host/layout-parsing"
+$env:PADDLEOCR_VL_API_TOKEN="your-paddleocr-vl-token"
 
 python -m finvl_eval.runner `
   --dataset data/pyfi/pyfi_eval_301.jsonl `
@@ -249,8 +251,28 @@ python -m finvl_eval.runner `
   --model paddleocr-vl-hybrid-docqa `
   --selector-model ernie-4.5-turbo-128k-preview `
   --artifacts-dir runs/pyfi_paddleocrvl15_glm301_artifacts `
-  --ocr-artifacts-dir runs/pyfi_paddleocr_text_glm301_artifacts `
   --out runs/pyfi_paddleocrvl15_hybrid_ernie45.jsonl `
+  --no-local-ocr-evidence `
+  --require-image `
+  --progress-every 25
+```
+
+跑纯远程 PaddleOCR-VL markdown + ERNIE 4.5 链路（不使用本地 OCR）：
+
+```powershell
+$env:FINVL_SELECTOR_API_KEY="your-aistudio-token"
+$env:FINVL_SELECTOR_BASE_URL="https://aistudio.baidu.com/llm/lmapi/v3"
+$env:PADDLEOCR_VL_API_URL="https://your-remote-host/layout-parsing"
+$env:PADDLEOCR_VL_API_TOKEN="your-paddleocr-vl-token"
+
+python -m finvl_eval.runner `
+  --dataset data/pyfi/pyfi_eval_301.jsonl `
+  --format jsonl `
+  --images-root data/pyfi `
+  --model remote-paddleocr-vl-ernie-docqa `
+  --selector-model ernie-4.5-turbo-128k-preview `
+  --artifacts-dir runs/pyfi_eval_301_pure_remote_paddleocrvl_ernie45_artifacts `
+  --out runs/pyfi_eval_301_pure_remote_paddleocrvl_ernie45.jsonl `
   --require-image `
   --progress-every 25
 ```
@@ -333,3 +355,45 @@ python -m pip install -e .
 - PyFi-600K: https://huggingface.co/datasets/AgenticFinLab/PyFi-600K
 - PaddleOCR-VL 1.5: https://www.paddleocr.ai/main/version3.x/algorithm/PaddleOCR-VL/PaddleOCR-VL-1.5.html
 - PaddleOCR-VL pipeline: https://www.paddleocr.ai/main/version3.x/pipeline_usage/PaddleOCR-VL.html
+
+## Remote Recommendation
+
+For the pure remote PaddleOCR-VL plus ERNIE 4.5 path, the final recommendation is:
+
+- Default mode: `promptLabel=spotting`
+- Manual override for clearly calculation-heavy questions: `promptLabel=table`
+
+Recommended default command:
+
+```powershell
+python -m finvl_eval.runner `
+  --dataset data/pyfi/pyfi_eval_301.jsonl `
+  --format jsonl `
+  --images-root data/pyfi `
+  --model remote-paddleocr-vl-ernie-docqa `
+  --selector-model ernie-4.5-turbo-128k-preview `
+  --selector-base-url https://aistudio.baidu.com/llm/lmapi/v3 `
+  --artifacts-dir runs/pyfi_eval_301_pure_remote_paddleocrvl_ernie45_spotting_artifacts `
+  --out runs/pyfi_eval_301_pure_remote_paddleocrvl_ernie45_spotting.jsonl `
+  --require-image `
+  --progress-every 25
+```
+
+Manual `table` override:
+
+```powershell
+python -m finvl_eval.runner `
+  --dataset data/pyfi/pyfi_eval_301.jsonl `
+  --format jsonl `
+  --images-root data/pyfi `
+  --model remote-paddleocr-vl-ernie-docqa `
+  --selector-model ernie-4.5-turbo-128k-preview `
+  --selector-base-url https://aistudio.baidu.com/llm/lmapi/v3 `
+  --paddle-vl-prompt-label table `
+  --artifacts-dir runs/pyfi_eval_301_pure_remote_paddleocrvl_ernie45_table_artifacts `
+  --out runs/pyfi_eval_301_pure_remote_paddleocrvl_ernie45_table.jsonl `
+  --require-image `
+  --progress-every 25
+```
+
+The complete remote experiment summary is documented in [docs/remote_paddleocrvl_ernie45_report.md](docs/remote_paddleocrvl_ernie45_report.md).
