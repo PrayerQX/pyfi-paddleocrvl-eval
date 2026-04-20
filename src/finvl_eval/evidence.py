@@ -114,6 +114,59 @@ def build_grounded_evidence(record: EvalRecord, parsed_markdown: str, ocr_text: 
     return EvidenceBundle(text="\n".join(sections), stats=stats)
 
 
+def build_remote_markdown_grounded_evidence(record: EvalRecord, parsed_markdown: str) -> EvidenceBundle:
+    query_text = " ".join([record.question, *record.options.values()])
+    query_tokens = _keywords(query_text)
+    query_numbers = set(_number_strings(query_text))
+    route = _route(record)
+
+    table_lines = _table_lines(parsed_markdown)
+    markdown_lines = _plain_lines(_strip_html_tables(parsed_markdown), "paddle_vl_markdown")
+    all_lines = table_lines + markdown_lines
+    scored_lines = [
+        EvidenceLine(line.source, line.text, _score_text(line.text, query_tokens, query_numbers))
+        for line in all_lines
+    ]
+    relevant = [line for line in sorted(scored_lines, key=lambda item: item.score, reverse=True) if line.score > 0]
+    if len(relevant) < 12:
+        relevant = sorted(scored_lines, key=lambda item: item.score, reverse=True)
+
+    option_evidence = _option_evidence(record, "\n".join(line.text for line in all_lines), relevant[:30])
+    numeric_candidates = _numeric_candidates(record, relevant[:30])
+
+    sections = [
+        "PaddleOCR-VL grounded evidence packet",
+        f"task_route: {route}",
+        f"capability: {record.capability}",
+        f"complexity: {record.complexity}",
+        "",
+        "option_evidence:",
+        *option_evidence,
+        "",
+        "calculation_candidates_exploratory:",
+        *(numeric_candidates or ["- none"]),
+        "",
+        "most_relevant_paddle_rows:",
+    ]
+    for idx, line in enumerate(relevant[:24], start=1):
+        sections.append(f"{idx}. [{line.source} score={line.score}] {line.text}")
+
+    background = record.context.get("image_background")
+    if background:
+        sections.extend(["", "image_background:", _trim(str(background), 2500)])
+    analysis = record.context.get("analysis_information")
+    if analysis:
+        sections.extend(["", "analysis_information:", _trim(str(analysis), 2500)])
+
+    stats = {
+        "route": route,
+        "table_rows": len(table_lines),
+        "markdown_lines": len(markdown_lines),
+        "relevant_rows": len(relevant),
+    }
+    return EvidenceBundle(text="\n".join(sections), stats=stats)
+
+
 def _route(record: EvalRecord) -> str:
     question = record.question.lower()
     capability = (record.capability or "").lower()
